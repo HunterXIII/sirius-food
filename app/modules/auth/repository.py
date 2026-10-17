@@ -23,6 +23,18 @@ class AuthRepository(ABC):
     def save_refresh_token(self, user_id: int, token_hash: str, expires_at: datetime) -> None:
         """Сохранить хеш нового refresh-токена."""
 
+    @abstractmethod
+    def get_refresh_token(self, token_hash: str):
+        """Найти refresh-токен по хешу. Если нет - вернуть None."""
+
+    @abstractmethod
+    def revoke_refresh_token(self, token) -> None:
+        """Отозвать один refresh-токен."""
+
+    @abstractmethod
+    def revoke_all_user_tokens(self, user_id: int) -> None:
+        """Отозвать все refresh-токены пользователя (сброс всех сессий)."""
+
 
 class PostgresAuthRepository(AuthRepository):
     """Реализация для PostgreSQL через SQLAlchemy ORM."""
@@ -40,6 +52,20 @@ class PostgresAuthRepository(AuthRepository):
             expires_at=expires_at,
             is_revoked=False,
         ))
+        self.db.commit()
+
+    def get_refresh_token(self, token_hash: str):
+        return self.db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
+
+    def revoke_refresh_token(self, token) -> None:
+        token.is_revoked = True
+        self.db.add(token)
+        self.db.commit()
+
+    def revoke_all_user_tokens(self, user_id: int) -> None:
+        self.db.query(RefreshToken).filter(RefreshToken.user_id == user_id).update(
+            {"is_revoked": True}
+        )
         self.db.commit()
 
 
@@ -61,6 +87,20 @@ class InMemoryAuthRepository(AuthRepository):
             expires_at=expires_at,
             is_revoked=False,
         )
+
+    def get_refresh_token(self, token_hash: str):
+        for token in memory_db.refresh_tokens.values():
+            if token.token_hash == token_hash:
+                return token
+        return None
+
+    def revoke_refresh_token(self, token) -> None:
+        memory_db.refresh_tokens[token.id].is_revoked = True
+
+    def revoke_all_user_tokens(self, user_id: int) -> None:
+        for token in memory_db.refresh_tokens.values():
+            if token.user_id == user_id:
+                token.is_revoked = True
 
 
 def get_auth_repository(db: Session) -> AuthRepository:
