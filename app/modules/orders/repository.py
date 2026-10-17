@@ -7,7 +7,8 @@ from abc import ABC, abstractmethod
 
 from sqlalchemy.orm import Session
 
-from app import config, memory_db
+from app import memory_db
+from app.core.config import settings
 from app.models import Order, User, MenuItem
 
 
@@ -93,6 +94,6 @@ def get_order_repository(db: Session) -> OrderRepository:
     Выбор реализации репозитория по настройке REPOSITORY.
     Хранилище меняется здесь, а service.py и router.py остаются как есть.
     """
-    if config.REPOSITORY == "memory":
+    if settings.REPOSITORY == "memory":
         return InMemoryOrderRepository()
     return PostgresOrderRepository(db)

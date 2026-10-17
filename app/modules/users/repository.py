@@ -7,7 +7,8 @@ from abc import ABC, abstractmethod
 
 from sqlalchemy.orm import Session
 
-from app import config, memory_db
+from app import memory_db
+from app.core.config import settings
 from app.models import User
 
 
@@ -95,6 +96,6 @@ def get_user_repository(db: Session) -> UserRepository:
     Выбор реализации репозитория по настройке REPOSITORY.
     Хранилище меняется здесь, а service.py и router.py остаются как есть.
     """
-    if config.REPOSITORY == "memory":
+    if settings.REPOSITORY == "memory":
         return InMemoryUserRepository()
     return PostgresUserRepository(db)
