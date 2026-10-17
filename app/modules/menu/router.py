@@ -1,12 +1,14 @@
 """
-Модуль управления меню столовой.
-В исходной MVP-версии содержит смешение слоёв.
+Транспортный слой модуля меню.
+Техническая валидация, сборка слоёв и перевод исключений в HTTP-статусы.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import MenuItem
+from app.exceptions import NotFoundError
 from app.schemas import MenuItemCreate, MenuItemUpdate
+from app.modules.menu.repository import get_menu_repository
+from app.modules.menu.service import MenuService
 
 router = APIRouter()
 
@@ -26,24 +28,14 @@ def create_menu_item(payload: MenuItemCreate, db: Session = Depends(get_db)):
             detail="Название блюда слишком короткое",
         )
 
-    # Бизнес-правило: название блюда должно быть уникальным.
-    existing = db.query(MenuItem).filter(MenuItem.name == payload.name).first()
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="Блюдо с таким названием уже существует",
-        )
+    service = MenuService(get_menu_repository(db))
 
-    new_item = MenuItem(
-        name=payload.name,
-        price=payload.price,
-        is_available=True,
-    )
-    db.add(new_item)
-    db.commit()
-    db.refresh(new_item)
+    try:
+        item_id = service.create_item(name=payload.name, price=payload.price)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return {"status": "success", "item_id": new_item.id}
+    return {"status": "success", "item_id": item_id}
 
 
 @router.patch("/items/{item_id}")
@@ -52,11 +44,6 @@ def update_menu_item(
     payload: MenuItemUpdate,
     db: Session = Depends(get_db),
 ):
-    # Поиск обновляемого блюда.
-    item = db.query(MenuItem).filter(MenuItem.id == item_id).first()
-    if not item:
-        raise HTTPException(status_code=404, detail="Блюдо не найдено")
-
     # Техническая валидация нового значения цены.
     if payload.price is not None and payload.price <= 0:
         raise HTTPException(
@@ -64,16 +51,16 @@ def update_menu_item(
             detail="Цена должна быть положительной",
         )
 
-    # Применение изменений.
-    if payload.name is not None:
-        item.name = payload.name
-    if payload.price is not None:
-        item.price = payload.price
-    if payload.is_available is not None:
-        item.is_available = payload.is_available
+    service = MenuService(get_menu_repository(db))
 
-    db.add(item)
-    db.commit()
-    db.refresh(item)
+    try:
+        item_id = service.update_item(
+            item_id=item_id,
+            name=payload.name,
+            price=payload.price,
+            is_available=payload.is_available,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    return {"status": "success", "item_id": item.id}
+    return {"status": "success", "item_id": item_id}
