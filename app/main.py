@@ -4,12 +4,16 @@
 Таблицы базы данных создаёт Alembic: alembic upgrade head.
 """
 from fastapi import FastAPI
+from app.modules.auth.router import router as auth_router
 from app.modules.users.router import router as users_router
 from app.modules.menu.router import router as menu_router
 from app.modules.orders.router import router as orders_router
 from app.modules.delivery.router import router as delivery_router
 
 app = FastAPI(title="Sirius.Food API")
+
+# Пути в auth-роутере уже начинаются с /auth (как в методичке), префикс не нужен.
+app.include_router(auth_router, tags=["auth"])
 
 app.include_router(users_router, prefix="/users", tags=["users"])
 app.include_router(menu_router, prefix="/menu", tags=["menu"])

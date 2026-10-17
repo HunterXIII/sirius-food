@@ -11,3 +11,7 @@ class NotFoundError(Exception):
 
 class ForbiddenError(Exception):
     """Действие запрещено бизнес-правилом (роутер вернёт 403)."""
+
+
+class AccessDeniedError(Exception):
+    """Пользователь не имеет прав на этот объект (роутер вернёт 403)."""

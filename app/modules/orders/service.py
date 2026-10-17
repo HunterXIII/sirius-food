@@ -2,12 +2,12 @@
 Слой бизнес-логики модуля заказов.
 Здесь нет импортов fastapi и sqlalchemy: сервис не знает ни про HTTP, ни про БД.
 """
-from app.exceptions import NotFoundError
+from app.exceptions import NotFoundError, AccessDeniedError
 from app.modules.orders.repository import OrderRepository
 
 
 class OrderService:
-    """Бизнес-правила оформления заказа."""
+    """Бизнес-правила оформления, просмотра и отмены заказов."""
 
     def __init__(self, repository: OrderRepository):
         # Инверсия зависимостей: репозиторий передают снаружи через конструктор,
@@ -38,3 +38,29 @@ class OrderService:
         # Списываем деньги и сохраняем заказ. Как именно - решает репозиторий.
         self.repository.update_user_balance(user, user.balance - total_cost)
         return self.repository.save_order(user_id, item_id, quantity, status="processing")
+
+    def get_kitchen_orders(self) -> list:
+        """Заказы, которые кухне нужно приготовить (статус processing)."""
+        return self.repository.get_orders_by_status("processing")
+
+    def cancel_order(self, order_id: int, current_user):
+        """
+        Отменяет заказ. Проверяет, что заказ принадлежит текущему пользователю.
+        NotFoundError - заказа нет, AccessDeniedError - заказ чужой,
+        ValueError - заказ уже нельзя отменить.
+        """
+        order = self.repository.get_order_by_id(order_id)
+        if order is None:
+            raise NotFoundError("Заказ не найден")
+
+        # Защита от IDOR: order_id пришёл от клиента, ему нельзя верить.
+        # Отменить можно только свой заказ.
+        if order.user_id != current_user.id:
+            raise AccessDeniedError("Нельзя отменить чужой заказ")
+
+        if order.status != "processing":
+            raise ValueError("Отменить можно только заказ, который ещё готовится")
+
+        order.status = "cancelled"
+        self.repository.update_order(order)
+        return order

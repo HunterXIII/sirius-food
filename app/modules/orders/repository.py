@@ -34,6 +34,18 @@ class OrderRepository(ABC):
     def update_user_balance(self, user, new_balance: float) -> None:
         """Сохранить новый баланс пользователя."""
 
+    @abstractmethod
+    def get_order_by_id(self, order_id: int):
+        """Найти заказ по id. Если нет - вернуть None."""
+
+    @abstractmethod
+    def get_orders_by_status(self, status: str) -> list:
+        """Все заказы с указанным статусом."""
+
+    @abstractmethod
+    def update_order(self, order) -> None:
+        """Сохранить изменения заказа."""
+
 
 class PostgresOrderRepository(OrderRepository):
     """Реализация для PostgreSQL через SQLAlchemy ORM."""
@@ -64,6 +76,16 @@ class PostgresOrderRepository(OrderRepository):
         self.db.add(user)
         self.db.commit()
 
+    def get_order_by_id(self, order_id: int):
+        return self.db.query(Order).filter(Order.id == order_id).first()
+
+    def get_orders_by_status(self, status: str) -> list:
+        return self.db.query(Order).filter(Order.status == status).order_by(Order.id).all()
+
+    def update_order(self, order) -> None:
+        self.db.add(order)
+        self.db.commit()
+
 
 class InMemoryOrderRepository(OrderRepository):
     """Реализация, которая хранит данные в памяти (app/memory_db.py)."""
@@ -87,6 +109,15 @@ class InMemoryOrderRepository(OrderRepository):
 
     def update_user_balance(self, user, new_balance: float) -> None:
         memory_db.users[user.id].balance = new_balance
+
+    def get_order_by_id(self, order_id: int):
+        return memory_db.orders.get(order_id)
+
+    def get_orders_by_status(self, status: str) -> list:
+        return [order for order in memory_db.orders.values() if order.status == status]
+
+    def update_order(self, order) -> None:
+        memory_db.orders[order.id] = order
 
 
 def get_order_repository(db: Session) -> OrderRepository:
