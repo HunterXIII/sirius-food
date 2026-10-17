@@ -4,6 +4,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from app.core.dependencies import require_role
 from app.database import get_db
 from app.exceptions import NotFoundError
 from app.schemas import MenuItemCreate, MenuItemUpdate
@@ -14,7 +15,12 @@ router = APIRouter()
 
 
 @router.post("/items")
-def create_menu_item(payload: MenuItemCreate, db: Session = Depends(get_db)):
+def create_menu_item(
+    payload: MenuItemCreate,
+    # Менять меню могут только повар и администратор.
+    current_user=Depends(require_role("admin", "cook")),
+    db: Session = Depends(get_db),
+):
     # Техническая валидация цены и названия.
     if payload.price <= 0:
         raise HTTPException(
@@ -42,6 +48,7 @@ def create_menu_item(payload: MenuItemCreate, db: Session = Depends(get_db)):
 def update_menu_item(
     item_id: int,
     payload: MenuItemUpdate,
+    current_user=Depends(require_role("admin", "cook")),
     db: Session = Depends(get_db),
 ):
     # Техническая валидация нового значения цены.

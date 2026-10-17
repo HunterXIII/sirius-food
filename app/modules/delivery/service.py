@@ -2,12 +2,12 @@
 Слой бизнес-логики модуля доставки.
 Здесь нет импортов fastapi и sqlalchemy.
 """
-from app.exceptions import NotFoundError, ForbiddenError
+from app.exceptions import NotFoundError, ForbiddenError, AccessDeniedError
 from app.modules.delivery.repository import DeliveryRepository
 
 
 class DeliveryService:
-    """Бизнес-правила назначения курьера и завершения доставки."""
+    """Бизнес-правила назначения курьера, просмотра и завершения доставки."""
 
     def __init__(self, repository: DeliveryRepository):
         # Инверсия зависимостей: репозиторий передают через конструктор.
@@ -31,6 +31,10 @@ class DeliveryService:
         if not courier:
             raise NotFoundError("Курьер не найден")
 
+        # Назначить можно только пользователя с ролью courier.
+        if courier.role.name != "courier":
+            raise ValueError("Пользователь не является курьером")
+
         if courier.is_blocked:
             raise ForbiddenError("Курьер заблокирован и не может быть назначен")
 
@@ -40,14 +44,37 @@ class DeliveryService:
 
         return self.repository.save_delivery(order_id, courier_id, status="in_progress")
 
-    def complete_delivery(self, delivery_id: int) -> None:
+    def get_delivery(self, delivery_id: int, current_user):
         """
-        Завершение доставки: доставка - "completed", заказ - "delivered".
-        NotFoundError - нет доставки, ValueError - доставка уже завершена или отменена.
+        Просмотр доставки. Видят её только двое: курьер этой доставки
+        и студент, чей это заказ.
+        NotFoundError - нет доставки, AccessDeniedError - доставка чужая.
         """
         delivery = self.repository.get_delivery_by_id(delivery_id)
         if not delivery:
             raise NotFoundError("Доставка не найдена")
+
+        order = self.repository.get_order_by_id(delivery.order_id)
+        is_courier = delivery.courier_id == current_user.id
+        is_customer = order is not None and order.user_id == current_user.id
+        if not is_courier and not is_customer:
+            raise AccessDeniedError("Нет доступа к этой доставке")
+
+        return delivery
+
+    def complete_delivery(self, delivery_id: int, current_user) -> None:
+        """
+        Завершение доставки: доставка - "completed", заказ - "delivered".
+        NotFoundError - нет доставки, AccessDeniedError - доставка другого курьера,
+        ValueError - доставка уже завершена или отменена.
+        """
+        delivery = self.repository.get_delivery_by_id(delivery_id)
+        if not delivery:
+            raise NotFoundError("Доставка не найдена")
+
+        # Защита от IDOR: завершить доставку может только её курьер.
+        if delivery.courier_id != current_user.id:
+            raise AccessDeniedError("Это доставка другого курьера")
 
         if delivery.status == "completed":
             raise ValueError("Доставка уже завершена")

@@ -48,3 +48,16 @@ class OrderResponse(BaseModel):
 class DeliveryAssign(BaseModel):
     order_id: int
     courier_id: int
+
+
+class DeliveryResponse(BaseModel):
+    id: int
+    order_id: int
+    courier_id: int
+    status: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoleUpdate(BaseModel):
+    role: str

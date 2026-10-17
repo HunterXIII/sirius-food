@@ -3,7 +3,7 @@
 Здесь нет импортов fastapi и sqlalchemy.
 """
 from app.core.security import hash_password
-from app.exceptions import NotFoundError, ForbiddenError
+from app.exceptions import NotFoundError, ForbiddenError, AccessDeniedError
 from app.modules.users.repository import UserRepository
 
 # Бизнес-правило: максимальная сумма одного пополнения.
@@ -36,15 +36,19 @@ class UserService:
             role_id=self.repository.get_role_id("student"),
         )
 
-    def top_up(self, user_id: int, amount: float) -> float:
+    def top_up(self, user_id: int, amount: float, current_user) -> float:
         """
         Пополнение баланса. Возвращает новый баланс.
-        NotFoundError - нет пользователя, ForbiddenError - пользователь
-        заблокирован, ValueError - сумма больше лимита.
+        NotFoundError - нет пользователя, AccessDeniedError - чужой баланс,
+        ForbiddenError - пользователь заблокирован, ValueError - сумма больше лимита.
         """
         user = self.repository.get_user_by_id(user_id)
         if not user:
             raise NotFoundError("Пользователь не найден")
+
+        # Защита от IDOR: user_id пришёл в URL, пополнить можно только свой баланс.
+        if user.id != current_user.id:
+            raise AccessDeniedError("Нельзя пополнить чужой баланс")
 
         if user.is_blocked:
             raise ForbiddenError("Пользователь заблокирован. Пополнение невозможно")
@@ -55,3 +59,18 @@ class UserService:
         new_balance = user.balance + amount
         self.repository.update_user_balance(user, new_balance)
         return new_balance
+
+    def change_role(self, user_id: int, role: str) -> None:
+        """
+        Смена роли пользователя (её делает администратор).
+        NotFoundError - нет пользователя, ValueError - нет такой роли.
+        """
+        user = self.repository.get_user_by_id(user_id)
+        if not user:
+            raise NotFoundError("Пользователь не найден")
+
+        role_id = self.repository.get_role_id(role)
+        if role_id is None:
+            raise ValueError("Такой роли нет")
+
+        self.repository.update_user_role(user, role_id)

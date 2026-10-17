@@ -7,7 +7,7 @@ import unittest
 
 from app import memory_db
 from app.core.security import verify_password
-from app.exceptions import NotFoundError, ForbiddenError
+from app.exceptions import NotFoundError, ForbiddenError, AccessDeniedError
 from app.modules.orders.repository import InMemoryOrderRepository
 from app.modules.orders.service import OrderService
 from app.modules.users.repository import InMemoryUserRepository
@@ -67,6 +67,30 @@ class OrderServiceTest(unittest.TestCase):
         with self.assertRaises(NotFoundError):
             self.service.create_order(user_id=99, item_id=1, quantity=1)
 
+    def test_cancel_own_order(self):
+        order_id = self.service.create_order(user_id=1, item_id=1, quantity=1)
+
+        self.service.cancel_order(order_id, current_user=memory_db.users[1])
+
+        self.assertEqual(memory_db.orders[order_id].status, "cancelled")
+
+    def test_cancel_foreign_order(self):
+        # IDOR: студент 2 подставляет id заказа студента 1.
+        add_user(2, "petr@sirius.ru")
+        order_id = self.service.create_order(user_id=1, item_id=1, quantity=1)
+
+        with self.assertRaises(AccessDeniedError):
+            self.service.cancel_order(order_id, current_user=memory_db.users[2])
+
+        self.assertEqual(memory_db.orders[order_id].status, "processing")
+
+    def test_cancel_twice(self):
+        order_id = self.service.create_order(user_id=1, item_id=1, quantity=1)
+        self.service.cancel_order(order_id, current_user=memory_db.users[1])
+
+        with self.assertRaises(ValueError):
+            self.service.cancel_order(order_id, current_user=memory_db.users[1])
+
 
 class UserServiceTest(unittest.TestCase):
     def setUp(self):
@@ -97,20 +121,42 @@ class UserServiceTest(unittest.TestCase):
     def test_top_up(self):
         user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
-        self.assertEqual(self.service.top_up(user_id=user.id, amount=1000), 1000)
+        self.assertEqual(self.service.top_up(user_id=user.id, amount=1000, current_user=user), 1000)
+
+    def test_top_up_foreign_balance(self):
+        user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
+        add_user(2, "petr@sirius.ru")
+
+        with self.assertRaises(AccessDeniedError):
+            self.service.top_up(user_id=user.id, amount=100, current_user=memory_db.users[2])
+
+        self.assertEqual(user.balance, 0.0)
 
     def test_top_up_over_limit(self):
         user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
         with self.assertRaises(ValueError):
-            self.service.top_up(user_id=user.id, amount=50001)
+            self.service.top_up(user_id=user.id, amount=50001, current_user=user)
 
     def test_top_up_blocked_user(self):
         user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
         user.is_blocked = True
 
         with self.assertRaises(ForbiddenError):
-            self.service.top_up(user_id=user.id, amount=100)
+            self.service.top_up(user_id=user.id, amount=100, current_user=user)
+
+    def test_change_role(self):
+        add_user(1, "ivan@sirius.ru")
+
+        self.service.change_role(user_id=1, role="cook")
+
+        self.assertEqual(memory_db.users[1].role.name, "cook")
+
+    def test_change_to_unknown_role(self):
+        add_user(1, "ivan@sirius.ru")
+
+        with self.assertRaises(ValueError):
+            self.service.change_role(user_id=1, role="director")
 
 
 class MenuServiceTest(unittest.TestCase):
@@ -142,9 +188,13 @@ class MenuServiceTest(unittest.TestCase):
 class DeliveryServiceTest(unittest.TestCase):
     def setUp(self):
         memory_db.clear()
-        # Курьер 2 обычный, курьер 3 заблокирован.
+        # Студент 1 - владелец заказов, студент 4 - посторонний.
+        # Курьер 2 обычный, курьер 3 заблокирован, курьер 5 - другой курьер.
+        add_user(1, "client@sirius.ru")
         add_user(2, "courier@sirius.ru", role="courier")
         add_user(3, "blocked@sirius.ru", is_blocked=True, role="courier")
+        add_user(4, "other@sirius.ru")
+        add_user(5, "courier2@sirius.ru", role="courier")
         # Заказы 1 и 2 оплачены, заказ 3 ещё нет.
         memory_db.orders[1] = memory_db.OrderRecord(
             id=1, user_id=1, item_id=1, quantity=1, status="paid"
@@ -166,6 +216,10 @@ class DeliveryServiceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.assign_courier(order_id=3, courier_id=2)
 
+    def test_assign_not_courier(self):
+        with self.assertRaises(ValueError):
+            self.service.assign_courier(order_id=1, courier_id=4)
+
     def test_assign_blocked_courier(self):
         with self.assertRaises(ForbiddenError):
             self.service.assign_courier(order_id=1, courier_id=3)
@@ -179,18 +233,42 @@ class DeliveryServiceTest(unittest.TestCase):
     def test_complete_delivery_marks_order_delivered(self):
         delivery_id = self.service.assign_courier(order_id=1, courier_id=2)
 
-        self.service.complete_delivery(delivery_id)
+        self.service.complete_delivery(delivery_id, current_user=memory_db.users[2])
 
         self.assertEqual(memory_db.deliveries[delivery_id].status, "completed")
         self.assertEqual(memory_db.orders[1].status, "delivered")
 
     def test_complete_twice(self):
         delivery_id = self.service.assign_courier(order_id=1, courier_id=2)
-        self.service.complete_delivery(delivery_id)
+        self.service.complete_delivery(delivery_id, current_user=memory_db.users[2])
 
         with self.assertRaises(ValueError):
-            self.service.complete_delivery(delivery_id)
+            self.service.complete_delivery(delivery_id, current_user=memory_db.users[2])
 
     def test_complete_not_found(self):
         with self.assertRaises(NotFoundError):
-            self.service.complete_delivery(99)
+            self.service.complete_delivery(99, current_user=memory_db.users[2])
+
+    def test_complete_by_other_courier(self):
+        delivery_id = self.service.assign_courier(order_id=1, courier_id=2)
+
+        with self.assertRaises(AccessDeniedError):
+            self.service.complete_delivery(delivery_id, current_user=memory_db.users[5])
+
+        self.assertEqual(memory_db.deliveries[delivery_id].status, "in_progress")
+
+    def test_get_delivery_by_courier_and_customer(self):
+        delivery_id = self.service.assign_courier(order_id=1, courier_id=2)
+
+        # Курьер этой доставки и студент, чей заказ, видят доставку.
+        self.service.get_delivery(delivery_id, current_user=memory_db.users[2])
+        self.service.get_delivery(delivery_id, current_user=memory_db.users[1])
+
+    def test_get_foreign_delivery(self):
+        delivery_id = self.service.assign_courier(order_id=1, courier_id=2)
+
+        # Другой курьер и посторонний студент - нет.
+        with self.assertRaises(AccessDeniedError):
+            self.service.get_delivery(delivery_id, current_user=memory_db.users[5])
+        with self.assertRaises(AccessDeniedError):
+            self.service.get_delivery(delivery_id, current_user=memory_db.users[4])

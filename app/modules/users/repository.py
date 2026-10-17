@@ -43,6 +43,10 @@ class UserRepository(ABC):
     def update_user_balance(self, user, new_balance: float) -> None:
         """Сохранить новый баланс пользователя."""
 
+    @abstractmethod
+    def update_user_role(self, user, role_id: int) -> None:
+        """Сохранить новую роль пользователя."""
+
 
 class PostgresUserRepository(UserRepository):
     """Реализация для PostgreSQL через SQLAlchemy ORM."""
@@ -88,6 +92,11 @@ class PostgresUserRepository(UserRepository):
         self.db.commit()
         self.db.refresh(user)
 
+    def update_user_role(self, user, role_id: int) -> None:
+        user.role_id = role_id
+        self.db.add(user)
+        self.db.commit()
+
 
 class InMemoryUserRepository(UserRepository):
     """Реализация, которая хранит данные в памяти (app/memory_db.py)."""
@@ -131,6 +140,9 @@ class InMemoryUserRepository(UserRepository):
 
     def update_user_balance(self, user, new_balance: float) -> None:
         memory_db.users[user.id].balance = new_balance
+
+    def update_user_role(self, user, role_id: int) -> None:
+        memory_db.users[user.id].role_id = role_id
 
 
 def get_user_repository(db: Session) -> UserRepository:
