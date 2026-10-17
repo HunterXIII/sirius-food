@@ -5,6 +5,13 @@
 Данные живут, пока работает процесс.
 """
 from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass
+class RoleRecord:
+    id: int
+    name: str
 
 
 @dataclass
@@ -14,6 +21,13 @@ class UserRecord:
     phone: str | None
     balance: float
     is_blocked: bool
+    password_hash: str
+    role_id: int
+
+    @property
+    def role(self) -> RoleRecord:
+        """Роль по role_id, как relationship("Role") в models.py."""
+        return roles[self.role_id]
 
 
 @dataclass
@@ -41,12 +55,23 @@ class DeliveryRecord:
     status: str
 
 
+@dataclass
+class RefreshTokenRecord:
+    id: int
+    user_id: int
+    token_hash: str
+    expires_at: datetime
+    is_revoked: bool
+
+
 # "Таблицы": id -> запись.
 # Общие для всех модулей, чтобы заказ видел пользователей и блюда.
+roles: dict[int, RoleRecord] = {}
 users: dict[int, UserRecord] = {}
 menu_items: dict[int, MenuItemRecord] = {}
 orders: dict[int, OrderRecord] = {}
 deliveries: dict[int, DeliveryRecord] = {}
+refresh_tokens: dict[int, RefreshTokenRecord] = {}
 
 
 def clear():
@@ -55,3 +80,13 @@ def clear():
     menu_items.clear()
     orders.clear()
     deliveries.clear()
+    refresh_tokens.clear()
+
+    # Роли - справочник. В PostgreSQL их заполняет миграция, здесь - мы сами.
+    roles.clear()
+    for role_id, name in enumerate(["student", "cook", "courier", "admin"], start=1):
+        roles[role_id] = RoleRecord(id=role_id, name=name)
+
+
+# Заполнить роли при старте.
+clear()

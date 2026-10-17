@@ -6,6 +6,7 @@ PostgreSQL не нужен: в сервисы передаются in-memory р�
 import unittest
 
 from app import memory_db
+from app.core.security import verify_password
 from app.exceptions import NotFoundError, ForbiddenError
 from app.modules.orders.repository import InMemoryOrderRepository
 from app.modules.orders.service import OrderService
@@ -17,12 +18,24 @@ from app.modules.delivery.repository import InMemoryDeliveryRepository
 from app.modules.delivery.service import DeliveryService
 
 
+def add_user(user_id, email, balance=0.0, is_blocked=False, role="student"):
+    """Положить пользователя прямо в memory_db (пароль сервисам здесь не нужен)."""
+    role_id = next(r.id for r in memory_db.roles.values() if r.name == role)
+    memory_db.users[user_id] = memory_db.UserRecord(
+        id=user_id,
+        email=email,
+        phone=None,
+        balance=balance,
+        is_blocked=is_blocked,
+        password_hash="",
+        role_id=role_id,
+    )
+
+
 class OrderServiceTest(unittest.TestCase):
     def setUp(self):
         memory_db.clear()
-        memory_db.users[1] = memory_db.UserRecord(
-            id=1, email="ivan@sirius.ru", phone=None, balance=500.0, is_blocked=False
-        )
+        add_user(1, "ivan@sirius.ru", balance=500.0)
         memory_db.menu_items[1] = memory_db.MenuItemRecord(
             id=1, name="Борщ", price=200.0, is_available=True
         )
@@ -61,30 +74,39 @@ class UserServiceTest(unittest.TestCase):
         self.service = UserService(InMemoryUserRepository())
 
     def test_register_with_zero_balance(self):
-        user = self.service.register(email="ivan@sirius.ru", phone=None)
+        user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
         self.assertEqual(user.balance, 0.0)
         self.assertFalse(user.is_blocked)
+        self.assertEqual(user.role.name, "student")
+
+    def test_register_stores_only_password_hash(self):
+        user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
+
+        # В хранилище не сам пароль, а bcrypt-хеш, и пароль с ним сходится.
+        self.assertNotEqual(user.password_hash, "password123")
+        self.assertTrue(user.password_hash.startswith("$2b$"))
+        self.assertTrue(verify_password("password123", user.password_hash))
 
     def test_register_duplicate_email(self):
-        self.service.register(email="ivan@sirius.ru", phone=None)
+        self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
         with self.assertRaises(ValueError):
-            self.service.register(email="ivan@sirius.ru", phone=None)
+            self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
     def test_top_up(self):
-        user = self.service.register(email="ivan@sirius.ru", phone=None)
+        user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
         self.assertEqual(self.service.top_up(user_id=user.id, amount=1000), 1000)
 
     def test_top_up_over_limit(self):
-        user = self.service.register(email="ivan@sirius.ru", phone=None)
+        user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
 
         with self.assertRaises(ValueError):
             self.service.top_up(user_id=user.id, amount=50001)
 
     def test_top_up_blocked_user(self):
-        user = self.service.register(email="ivan@sirius.ru", phone=None)
+        user = self.service.register(email="ivan@sirius.ru", password="password123", phone=None)
         user.is_blocked = True
 
         with self.assertRaises(ForbiddenError):
@@ -121,12 +143,8 @@ class DeliveryServiceTest(unittest.TestCase):
     def setUp(self):
         memory_db.clear()
         # Курьер 2 обычный, курьер 3 заблокирован.
-        memory_db.users[2] = memory_db.UserRecord(
-            id=2, email="courier@sirius.ru", phone=None, balance=0.0, is_blocked=False
-        )
-        memory_db.users[3] = memory_db.UserRecord(
-            id=3, email="blocked@sirius.ru", phone=None, balance=0.0, is_blocked=True
-        )
+        add_user(2, "courier@sirius.ru", role="courier")
+        add_user(3, "blocked@sirius.ru", is_blocked=True, role="courier")
         # Заказы 1 и 2 оплачены, заказ 3 ещё нет.
         memory_db.orders[1] = memory_db.OrderRecord(
             id=1, user_id=1, item_id=1, quantity=1, status="paid"

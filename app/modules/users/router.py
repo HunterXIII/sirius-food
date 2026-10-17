@@ -23,10 +23,20 @@ def register_user(payload: UserCreate, db: Session = Depends(get_db)):
             detail="Некорректный формат номера телефона",
         )
 
+    if len(payload.password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="Пароль должен быть не короче 8 символов",
+        )
+
     service = UserService(get_user_repository(db))
 
     try:
-        user = service.register(email=payload.email, phone=payload.phone)
+        user = service.register(
+            email=payload.email,
+            password=payload.password,
+            phone=payload.phone,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

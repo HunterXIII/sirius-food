@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import memory_db
 from app.core.config import settings
-from app.models import User
+from app.models import User, Role
 
 
 class UserRepository(ABC):
@@ -24,8 +24,20 @@ class UserRepository(ABC):
         """Найти пользователя по email. Если нет - вернуть None."""
 
     @abstractmethod
-    def save_user(self, email: str, phone: str | None, balance: float, is_blocked: bool):
+    def save_user(
+        self,
+        email: str,
+        phone: str | None,
+        balance: float,
+        is_blocked: bool,
+        password_hash: str,
+        role_id: int,
+    ):
         """Сохранить нового пользователя и вернуть его."""
+
+    @abstractmethod
+    def get_role_id(self, name: str) -> int | None:
+        """Найти id роли по названию. Если нет - вернуть None."""
 
     @abstractmethod
     def update_user_balance(self, user, new_balance: float) -> None:
@@ -44,17 +56,31 @@ class PostgresUserRepository(UserRepository):
     def get_user_by_email(self, email: str):
         return self.db.query(User).filter(User.email == email).first()
 
-    def save_user(self, email: str, phone: str | None, balance: float, is_blocked: bool):
+    def save_user(
+        self,
+        email: str,
+        phone: str | None,
+        balance: float,
+        is_blocked: bool,
+        password_hash: str,
+        role_id: int,
+    ):
         new_user = User(
             email=email,
             phone=phone,
             balance=balance,
             is_blocked=is_blocked,
+            password_hash=password_hash,
+            role_id=role_id,
         )
         self.db.add(new_user)
         self.db.commit()
         self.db.refresh(new_user)
         return new_user
+
+    def get_role_id(self, name: str) -> int | None:
+        role = self.db.query(Role).filter(Role.name == name).first()
+        return role.id if role else None
 
     def update_user_balance(self, user, new_balance: float) -> None:
         user.balance = new_balance
@@ -75,7 +101,15 @@ class InMemoryUserRepository(UserRepository):
                 return user
         return None
 
-    def save_user(self, email: str, phone: str | None, balance: float, is_blocked: bool):
+    def save_user(
+        self,
+        email: str,
+        phone: str | None,
+        balance: float,
+        is_blocked: bool,
+        password_hash: str,
+        role_id: int,
+    ):
         user_id = len(memory_db.users) + 1
         new_user = memory_db.UserRecord(
             id=user_id,
@@ -83,9 +117,17 @@ class InMemoryUserRepository(UserRepository):
             phone=phone,
             balance=balance,
             is_blocked=is_blocked,
+            password_hash=password_hash,
+            role_id=role_id,
         )
         memory_db.users[user_id] = new_user
         return new_user
+
+    def get_role_id(self, name: str) -> int | None:
+        for role in memory_db.roles.values():
+            if role.name == name:
+                return role.id
+        return None
 
     def update_user_balance(self, user, new_balance: float) -> None:
         memory_db.users[user.id].balance = new_balance

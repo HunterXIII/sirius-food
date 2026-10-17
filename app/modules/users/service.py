@@ -2,6 +2,7 @@
 Слой бизнес-логики модуля пользователей.
 Здесь нет импортов fastapi и sqlalchemy.
 """
+from app.core.security import hash_password
 from app.exceptions import NotFoundError, ForbiddenError
 from app.modules.users.repository import UserRepository
 
@@ -16,7 +17,7 @@ class UserService:
         # Инверсия зависимостей: репозиторий передают через конструктор.
         self.repository = repository
 
-    def register(self, email: str, phone: str | None):
+    def register(self, email: str, password: str, phone: str | None):
         """
         Регистрация пользователя. Возвращает созданного пользователя.
         ValueError - email уже занят.
@@ -24,12 +25,15 @@ class UserService:
         if self.repository.get_user_by_email(email):
             raise ValueError("Пользователь с таким email уже зарегистрирован")
 
-        # Новый пользователь: нулевой баланс, не заблокирован.
+        # Новый пользователь: нулевой баланс, не заблокирован, роль student.
+        # В БД попадает только bcrypt-хеш пароля.
         return self.repository.save_user(
             email=email,
             phone=phone,
             balance=0.0,
             is_blocked=False,
+            password_hash=hash_password(password),
+            role_id=self.repository.get_role_id("student"),
         )
 
     def top_up(self, user_id: int, amount: float) -> float:
