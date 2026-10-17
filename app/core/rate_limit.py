@@ -17,7 +17,9 @@ def rate_limit(max_requests: int = 5, window: int = 60):
     Возбуждает HTTPException 429 при превышении лимита.
     """
     def checker(request: Request):
-        ip = request.client.host
+        # Адреса клиента может не быть (так бывает по стандарту ASGI,
+        # например в TestClient). Тогда считаем всех таких клиентов вместе.
+        ip = request.client.host if request.client else "unknown"
         key = f"rate_limit:{ip}:{request.url.path}"
         current = redis_client.incr(key)
         # Первый запрос в окне: ключ сам удалится через window секунд.
