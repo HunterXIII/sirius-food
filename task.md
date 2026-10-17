@@ -1,12 +1,46 @@
-# Лабораторная работа № 2
+# Лабораторная работа № 3
 
-## Рефакторинг MVP-модулей в архитектуру Clean Architecture
+## Внедрение аутентификации и авторизации в архитектуру Clean Architecture
 
 Дисциплина: Разработка программных модулей и приложений для серверов  
-Тема: Применение принципов Чистой архитектуры (Clean Architecture)  
-Продолжительность: 2 академических часа (90 минут)  
+Тема: Безопасность серверных приложений: JWT, RBAC, защита от IDOR  
+Продолжительность: 2 академических часа (90 минут) + самостоятельная работа  
 Проект: сквозной пет-проект «Сириус.Еда»  
 Операционная система: Ubuntu 22.04 LTS или новее
+
+(Условие лабораторной работы № 2 - в коммите с тегом `lab2`: `git show lab2:task.md`.)
+
+### Цели работы
+
+В ходе выполнения лабораторной работы мы:
+
+- Освоим разницу между аутентификацией и авторизацией — научимся разделять эти понятия и применять их на разных слоях архитектуры.
+- Внедрим JWT-аутентификацию — реализуем выдачу access- и refresh-токенов, научимся защищать эндпоинты через dependency `get_current_user`.
+- Реализуем RBAC (ролевую модель) — разграничим доступ между ролями `student`, `cook`, `courier`, `admin`.
+- Закроем уязвимость IDOR — научимся проверять права на конкретный объект в слое бизнес-логики.
+- Обеспечим безопасность паролей — реализуем хеширование через bcrypt.
+
+Дополнительно (для 9 баллов):
+
+- Внедрим rate limiting на Redis — защитим эндпоинты от брутфорса и спама.
+- Настроим Secure by Default — вынесем секреты в `.env`, ограничим CORS, отключим Swagger в продакшене.
+
+Для 10 баллов — одно задание на выбор:
+
+- Refresh Token rotation — при каждом обновлении access-токена старый refresh-токен инвалидируется, выдаётся новый. Если злоумышленник попытается использовать старый refresh-токен, вся сессия пользователя сбрасывается.
+- Защита второго модуля — полностью защитить `users` или `delivery` по образцу `orders`.
+- OAuth2 через внешнего провайдера — подключить вход через Google или VK. Документация: https://fastapi.tiangolo.com/advanced/security/oauth2-scopes/.
+
+### Критерии оценивания (10-балльная шкала)
+
+| Баллы | Оценка | Что нужно сделать |
+|---|---|---|
+| 0–3 | Неудовлетворительно (2) | JWT не внедрён, IDOR не закрыт, проект не запускается. Требования не соблюдены. |
+| 4–5 | Удовлетворительно (3) | JWT внедрён, но RBAC или защита от IDOR работают некорректно. Часть эндпоинтов не защищена. Проект запускается, но Swagger не полностью работоспособен. |
+| 6–7 | Хорошо (4) | JWT, RBAC и защита от IDOR реализованы корректно. Проект полностью работоспособен в Swagger. `user_id` убран из payload. Хеширование паролей работает. |
+| 8 | Отлично (5) | Все требования уровня 6–7 выполнены. Дополнительно: написано не менее 4 тестов на безопасность. Оформлен `README.md`. Устная защита демонстрирует понимание архитектурных решений. |
+| 9 | Отлично с плюсом (5+) | Все требования уровня 8 выполнены. Дополнительно: реализован rate limiting на Redis, CORS ограничен, секреты вынесены в `.env`, Swagger отключён в продакшене. |
+| 10 | Отлично с двойным плюсом (5++) | Все требования уровня 9 выполнены. Дополнительно выполнено одно задание на выбор: Refresh Token rotation, защита второго модуля или OAuth2-провайдер. |
 
 ### 1. Пререквизиты
 
@@ -14,368 +48,131 @@
 
 - Ubuntu 22.04 LTS (или совместимый дистрибутив Linux);
 - Python 3.11 или новее;
-- менеджер пакетов `pip` и модуль `venv`;
-- Docker Engine и Docker Compose (для запуска PostgreSQL и Redis);
-- Git.
+- pip и модуль venv;
+- Docker Engine и Docker Compose (для PostgreSQL и Redis);
+- Git;
+- выполненная лабораторная работа № 2 — модули отрефакторены по Clean Architecture.
 
-Установка зависимостей в терминале:
+#### Установка дополнительных зависимостей
+
+Нам нужно установить несколько библиотек. Каждая решает свою задачу:
+
+- `passlib[bcrypt]` — хеширование паролей. Превращает пароль в необратимый хеш, который нельзя восстановить.
+- `python-jose[cryptography]` — работа с JWT. Создание и проверка подписи токенов.
+- `alembic` — миграции базы данных. Позволяет изменить схему БД без потери данных.
+- `redis` — клиент Redis. Понадобится для rate limiting и кеширования.
+- `pydantic-settings` — загрузка настроек из `.env`. Позволяет хранить секреты вне кода.
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-pip python3-venv docker.io docker-compose git
-
-python3 -m venv .venv
 source .venv/bin/activate
-pip install fastapi uvicorn sqlalchemy psycopg2-binary pydantic python-dotenv
+pip install "passlib[bcrypt]" "python-jose[cryptography]" alembic redis pydantic-settings
 ```
 
-Запуск инфраструктуры:
+#### Запуск инфраструктуры
+
+PostgreSQL и Redis запускаются в Docker-контейнерах. Это изолирует их от системы и делает конфигурацию воспроизводимой.
 
 ```bash
-sudo docker-compose up -d db redis
+docker compose up -d db redis
 ```
 
-Запуск приложения:
+#### Запуск приложения
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Проверка: открыть в браузере `http://127.0.0.1:8000/docs`. В интерфейсе Swagger должны отображаться эндпоинты всех четырёх модулей.
+Проверка: открыть `http://127.0.0.1:8000/docs`. В Swagger должны отображаться эндпоинты всех четырёх модулей.
 
 ### 2. Теоретическое введение
 
-#### 2.1. Проблема жёсткой связности (Tight Coupling)
+#### 2.1. Аутентификация и авторизация
 
-На этапе разработки минимально жизнеспособного продукта (MVP) код часто пишется без разделения на слои: обработка HTTP-запроса, бизнес-проверки и SQL-запросы размещаются в одной функции-обработчике. Такой подход сокращает время разработки на старте, однако приводит к следующим недостаткам:
+Это два разных процесса, которые часто путают.
 
-- низкая поддерживаемость: изменение схемы базы данных или замена веб-фреймворка требует переписывания значительной части кода;
-- невозможность изолированного тестирования: для проверки бизнес-правила требуется запуск СУБД и веб-сервера;
-- дублирование логики: одно и то же бизнес-правило может быть реализовано в нескольких эндпоинтах с небольшими расхождениями.
+Аутентификация отвечает на вопрос «Кто ты?». Это проверка подлинности пользователя: логин и пароль, токен, сертификат.
 
-#### 2.2. Концепция Clean Architecture
+Авторизация отвечает на вопрос «Что тебе можно?». Это проверка прав: может ли этот пользователь выполнить это действие над этим объектом.
 
-Концепция предложена Робертом Мартином в 2012 году. Фундаментальный принцип: направление зависимостей строго ориентировано снаружи внутрь. Внутренние слои не должны знать о существовании внешних.
+Ошибка на уровне аутентификации приводит к тому, что злоумышленник выдаёт себя за другого пользователя. Ошибка на уровне авторизации приводит к тому, что легальный пользователь получает доступ к чужим данным.
 
-Эталонная модель содержит четыре концентрических круга (изнутри наружу):
+#### 2.2. JWT (JSON Web Token)
 
-- Entities — бизнес-сущности предметной области.
-- Use Cases — сценарии использования (прикладная логика).
-- Interface Adapters — адаптеры интерфейсов (репозитории, презентеры, контроллеры).
-- Frameworks & Drivers — фреймворки, драйверы, СУБД.
+JWT — это компактный формат передачи данных, подписанный сервером. Токен состоит из трёх частей, разделённых точками:
 
-При проектировании веб-сервисов четыре круга принято группировать в три практических слоя:
+```text
+header.payload.signature
+```
 
-| Слой в проекте | Файл | Соответствие модели Мартина | Зона ответственности |
-|---|---|---|---|
-| API Layer (транспортный) | `router.py` | Круг 4: Frameworks & Drivers | Приём HTTP-запроса, техническая валидация (Pydantic), трансляция исключений в HTTP-статусы, возврат ответа |
-| Business Logic Layer | `service.py` | Круги 1 и 2: Entities и Use Cases | Бизнес-правила предметной области, оркестрация сценария |
-| Infrastructure Layer | `repository.py` | Круг 3: Interface Adapters | SQL-запросы, транзакции, взаимодействие с СУБД через ORM |
+- Header — алгоритм подписи (например, HS256).
+- Payload — данные (обычно `sub` — идентификатор пользователя, `exp` — срок действия).
+- Signature — подпись, которая проверяется сервером.
 
-Ключевое ограничение: в файле `service.py` запрещены импорты `fastapi` и `sqlalchemy`. Это архитектурное требование, а не стилистическая рекомендация.
+Важно: payload не зашифрован, а только закодирован в Base64. Любой может его прочитать. Поэтому в JWT нельзя хранить пароли, персональные данные и другую чувствительную информацию.
 
-#### 2.3. Паттерн Repository
+- Access-токен — короткоживущий (15 минут). Используется для авторизации запросов.
+- Refresh-токен — долгоживущий (7 дней). Используется для получения нового access-токена.
 
-Repository — это архитектурный паттерн, инкапсулирующий логику доступа к данным. Бизнес-логика обращается к репозиторию через методы, семантика которых отражает предметную область (`save_order`, `get_user_by_id`), а не технические операции (`INSERT`, `SELECT`). Реализация репозитория может быть заменена без изменения бизнес-логики: PostgreSQL, MongoDB, in-memory-хранилище.
+#### 2.3. IDOR (Insecure Direct Object Reference)
+
+IDOR — уязвимость, при которой сервер доверяет идентификатору объекта, пришедшему от клиента, и не проверяет, имеет ли текущий пользователь право на этот объект.
+
+Пример: эндпоинт `POST /orders/{order_id}/cancel` принимает `order_id` и отменяет заказ. Если сервер не проверяет, что заказ принадлежит текущему пользователю, злоумышленник может отменить чужой заказ, подставив другой `order_id`.
+
+Защита: проверка `order.customer_id == current_user.id` в слое бизнес-логики (Service).
+
+#### 2.4. RBAC (Role-Based Access Control)
+
+RBAC — модель управления доступом, при которой права выдаются не конкретному пользователю, а роли. Пользователь получает роль и вместе с ней все её права.
+
+Роли в «Сириус.Еде»: `student`, `cook`, `courier`, `admin`.
+
+Принцип: студент не может видеть кухню, курьер — чужие доставки, повар — создавать заказы.
 
 ### 3. Исходное состояние проекта
 
-Проект «Сириус.Еда» представляет собой модульный монолит, состоящий из четырёх модулей: `users`, `menu`, `orders`, `delivery`. Все модули написаны в MVP-стиле: бизнес-логика, SQL-запросы и обработка HTTP находятся в одном файле.
+После выполнения лабораторной работы № 2 модули разделены на три слоя: `router.py`, `service.py`, `repository.py`. Однако система не имеет аутентификации и авторизации. Любой пользователь может:
 
-В рамках лабораторной работы выполняется рефакторинг одного модуля совместно с преподавателем (`orders`) и одного модуля самостоятельно (по указанию преподавателя: `users` или `menu`).
+- отменить чужой заказ (IDOR);
+- видеть чужие доставки;
+- вызывать эндпоинты, не предназначенные для его роли;
+- создавать заказы от имени других пользователей (через `user_id` в payload).
 
-Полный исходный код всех модулей приведён в Приложении А.
+Цель работы — закрыть эти уязвимости, не нарушив архитектуру Clean Architecture.
 
-### 4. Пошаговый разбор рефакторинга модуля `orders`
+### 4. Пошаговый разбор внедрения безопасности
 
-#### Шаг 1. Изоляция инфраструктурного слоя (`repository.py`)
+#### Шаг 1. Миграция базы данных
 
-Создать файл `orders/repository.py`. В него переносится весь код, содержащий прямые импорты `sqlalchemy` и знание внутренней структуры моделей базы данных. Взаимодействие организуется через класс `OrderRepository`.
+Что делаем: добавляем в схему БД таблицы и колонки, необходимые для аутентификации и авторизации.
 
-```python
-# orders/repository.py
-from sqlalchemy.orm import Session
-from models import Order, User, MenuItem
+Зачем: без таблицы `roles` невозможен RBAC. Без `password_hash` нельзя хранить пароли безопасно. Без `refresh_tokens` нельзя реализовать обновление токенов.
 
+##### 1.1. Инициализация Alembic
 
-class OrderRepository:
-    """
-    Класс отвечает исключительно за выполнение операций ввода-вывода
-    в контексте СУБД PostgreSQL с использованием SQLAlchemy ORM.
-    Бизнес-правила в данном классе отсутствуют.
-    """
+Alembic — это инструмент миграций. Он позволяет изменять схему БД без потери данных. Инициализация выполняется один раз для проекта.
 
-    def __init__(self, db: Session):
-        self.db = db
-
-    def get_user_by_id(self, user_id: int):
-        """Извлечение объекта пользователя по идентификатору."""
-        return self.db.query(User).filter(User.id == user_id).first()
-
-    def get_menu_item_by_id(self, item_id: int):
-        """Извлечение объекта блюда из меню по идентификатору."""
-        return self.db.query(MenuItem).filter(MenuItem.id == item_id).first()
-
-    def save_order(self, user_id: int, item_id: int, quantity: int) -> int:
-        """
-        Создание новой записи заказа и фиксация транзакции.
-        Возвращает идентификатор созданного заказа.
-        """
-        new_order = Order(
-            user_id=user_id,
-            item_id=item_id,
-            quantity=quantity,
-            status="processing",
-        )
-        self.db.add(new_order)
-        self.db.commit()
-        self.db.refresh(new_order)
-        return new_order.id
-
-    def update_user_balance(self, user, new_balance: float) -> None:
-        """Изменение значения баланса пользователя с фиксацией транзакции."""
-        user.balance = new_balance
-        self.db.add(user)
-        self.db.commit()
+```bash
+alembic init alembic
 ```
 
-После выполнения шага единственным компонентом, знающим о структуре SQL-таблиц, становится данный файл.
+Что произойдёт: создастся папка `alembic/` и файл `alembic.ini`.
 
-#### Шаг 2. Реализация слоя бизнес-логики (`service.py`)
+Что нужно настроить: в файле `alembic/env.py` укажи `DATABASE_URL` и `Base.metadata`. Это нужно, чтобы Alembic знал, с какой БД работать и какие модели отслеживать. Без этой настройки autogenerate не увидит изменений в моделях.
 
-Создать файл `orders/service.py`. Данный слой не должен зависеть от веб-интерфейса и механизмов хранения данных. Применение импортов из `fastapi` или `sqlalchemy` в этом файле является архитектурной ошибкой.
+##### 1.2. Обновить модель User
 
-Связывание со слоем данных выполняется через принцип инверсии зависимостей: экземпляр репозитория передаётся в конструктор сервиса как абстрактная зависимость.
-
-```python
-# orders/service.py
-from orders.repository import OrderRepository
-
-
-class OrderService:
-    """
-    Класс инкапсулирует бизнес-правила обработки заказов.
-    Не имеет зависимостей от инфраструктурных фреймворков.
-    """
-
-    def __init__(self, repository: OrderRepository):
-        # Внедрение зависимости через конструктор.
-        self.repository = repository
-
-    def create_order(self, user_id: int, item_id: int, quantity: int) -> int:
-        """
-        Исполнение сценария оформления заказа.
-        Возвращает идентификатор созданного заказа.
-        Возбуждает ValueError при нарушении бизнес-правил.
-        """
-        user = self.repository.get_user_by_id(user_id)
-        if not user:
-            raise ValueError("Пользователь не найден")
-
-        item = self.repository.get_menu_item_by_id(item_id)
-        if not item:
-            raise ValueError("Указанное блюдо не найдено в меню")
-
-        if not item.is_available:
-            raise ValueError("Блюдо временно недоступно")
-
-        total_cost = item.price * quantity
-        if user.balance < total_cost:
-            raise ValueError("Недостаточно средств на балансе студента")
-
-        # Изменение состояния доменных данных.
-        user.balance -= total_cost
-        self.repository.update_user_balance(user, user.balance)
-
-        # Делегирование операции сохранения инфраструктурному слою.
-        order_id = self.repository.save_order(user_id, item_id, quantity)
-        return order_id
-```
-
-#### Шаг 3. Очистка транспортного слоя (`router.py`)
-
-Исходный файл `orders/router.py` модифицируется: из него удаляются прямые обращения к моделям данных и бизнес-проверки. Роутер выполняет роль диспетчера: собирает слои, передаёт параметры в сервис и транслирует исключения языка Python в HTTP-статусы.
+Что делаем: добавляем в модель поля `password_hash` и `role_id`, создаём модели `Role` и `RefreshToken`.
 
 ```python
-# orders/router.py
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from database import get_db
-from schemas import OrderCreate
-from orders.repository import OrderRepository
-from orders.service import OrderService
-
-router = APIRouter()
-
-
-@router.post("/orders/create")
-def create_order(payload: OrderCreate, db: Session = Depends(get_db)):
-    # Техническая валидация уровня транспортного протокола.
-    if payload.quantity <= 0:
-        raise HTTPException(status_code=400, detail="Количество должно быть больше нуля")
-
-    # Сборка архитектурных слоёв.
-    repository = OrderRepository(db)
-    service = OrderService(repository)
-
-    # Делегирование выполнения сценария слою бизнес-логики.
-    try:
-        order_id = service.create_order(
-            user_id=payload.user_id,
-            item_id=payload.item_id,
-            quantity=payload.quantity,
-        )
-    except ValueError as e:
-        # Трансляция внутреннего исключения в HTTP-статус.
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {"status": "success", "order_id": order_id}
-```
-
-### 5. Проверка работоспособности
-
-После выполнения рефакторинга проект должен сохранять полную работоспособность. Изменение внутренней архитектуры не должно изменять внешнее поведение API.
-
-Порядок проверки:
-
-- Перезапустить сервер: `uvicorn app.main:app --reload`.
-- Открыть `http://127.0.0.1:8000/docs`.
-- Выполнить запрос `POST /orders/create` с тестовыми данными.
-- Убедиться, что заказ создан, баланс пользователя списан, структура ответа идентична структуре ответа до рефакторинга.
-- Проверить, что в терминале отображаются SQL-логи, соответствующие операциям `INSERT` и `UPDATE`.
-
-### 6. Задание для самостоятельной работы
-
-В аналогичном MVP-состоянии находятся модули `users` и `menu`. Модуль `delivery` может быть выбран дополнительно студентами, претендующими на повышенную оценку.
-
-Задание: выполнить рефакторинг указанного преподавателем модуля в соответствии с принципами Clean Architecture, используя разобранный шаблон модуля `orders`.
-
-Требования к выполнению:
-
-- Разделить модуль на три файла: `router.py`, `service.py`, `repository.py`.
-- В файле `service.py` обеспечить отсутствие импортов `fastapi` и `sqlalchemy`.
-- Реализовать передачу репозитория в сервис через конструктор (инверсия зависимостей).
-- Сохранить работоспособность приложения: при запуске сервера эндпоинты рефакторируемого модуля в Swagger должны корректно принимать и обрабатывать запросы, возвращая идентичные структуры ответов.
-- Добавить не менее одного unit-теста на `service.py`, не требующего запуска СУБД.
-
-Задание сдаётся в виде:
-
-- репозитория Git с историей коммитов, отражающей процесс рефакторинга;
-- файла `README.md` с описанием изменений и диаграммой пути запроса через слои;
-- устной защиты с ответами на контрольные вопросы.
-
-### 7. Критерии оценивания (10-балльная шкала)
-
-| Баллы | Оценка по 5-балльной шкале | Критерии |
-|---|---|---|
-| 0–3 | Неудовлетворительно (2) | Рефакторинг не выполнен или выполнен формально. Импорты `fastapi` и `sqlalchemy` присутствуют в `service.py`. Проект не запускается. Требования не соблюдены. |
-| 4–5 | Удовлетворительно (3) | Модуль разделён на три файла, однако границы слоёв нарушены: в `service.py` присутствуют обращения к моделям БД или к `HTTPException`. Инверсия зависимостей не реализована либо реализована с ошибками. Проект запускается, но часть эндпоинтов работает некорректно. |
-| 6–7 | Хорошо (4) | Модуль разделён на три слоя корректно. `service.py` не импортирует `fastapi` и `sqlalchemy`. Инверсия зависимостей реализована через конструктор. Проект полностью работоспособен в Swagger, ответы идентичны исходным. Unit-тесты отсутствуют. |
-| 8 | Отлично (5) | Все требования уровня 6–7 выполнены. Дополнительно: написан минимум один unit-тест на `service.py`, не требующий запуска СУБД. Оформлен `README.md` с описанием изменений и схемой слоёв. Устная защита демонстрирует понимание архитектурных решений. |
-| 9 | Отлично с плюсом (5+) | Все требования уровня 8 выполнены. Дополнительно: отрефакторены два модуля вместо одного, либо в `repository.py` выделен абстрактный интерфейс (ABC) с двумя реализациями (например, PostgreSQL и in-memory для тестов). |
-| 10 | Отлично с двойным плюсом (5++) | Все требования уровня 9 выполнены. Дополнительно: реализована полноценная замена реализации репозитория без изменения `service.py` и `router.py` (принцип подстановки Лисков), либо выполнен рефакторинг модуля `delivery`, включающего асинхронное взаимодействие. |
-
-### 8. Контрольные вопросы для защиты работы
-
-- Какому кругу эталонной модели Роберта Мартина соответствует компонент `repository.py`? Обоснуйте ответ.
-- Почему в файле `service.py` запрещено использовать импорты модулей `fastapi` и `sqlalchemy`? Какое архитектурное правило при этом соблюдается?
-- В каком слое должна выполняться проверка формата входящего email-адреса, а в каком — проверка уникальности этого email среди существующих пользователей? Объясните с точки зрения разделения ответственности слоёв.
-- Что представляет собой принцип инверсии зависимостей (Dependency Inversion Principle) и как он реализован в разобранном решении?
-- Какие изменения потребуется внести в проект при замене PostgreSQL на MongoDB? Какие файлы будут затронуты, а какие останутся без изменений?
-- Возможно ли повторное использование класса `OrderService` в CLI-утилите или в фоновом обработчике задач (например, Celery)? Обоснуйте ответ.
-- В чём разница между технической валидацией входных данных и бизнес-валидацией предметной области? Приведите примеры для каждого типа.
-- Какое из следующих утверждений нарушает правило зависимостей Clean Architecture и почему: «`service.py` импортирует `HTTPException` из `fastapi` для возврата ошибки 400»?
-
-## Приложение А. Исходный код MVP-версии проекта
-
-### A.1. Структура проекта
-
-```text
-sirius_food/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── database.py
-│   ├── models.py
-│   ├── schemas.py
-│   └── modules/
-│       ├── users/
-│       │   └── router.py
-│       ├── menu/
-│       │   └── router.py
-│       ├── orders/
-│       │   └── router.py
-│       └── delivery/
-│           └── router.py
-├── docker-compose.yml
-└── requirements.txt
-```
-
-### A.2. `app/main.py`
-
-```python
-"""
-Точка входа приложения. Выполняет инициализацию FastAPI,
-подключение модулей и создание таблиц базы данных.
-"""
-from fastapi import FastAPI
-from app.database import Base, engine
-from app.modules.users.router import router as users_router
-from app.modules.menu.router import router as menu_router
-from app.modules.orders.router import router as orders_router
-from app.modules.delivery.router import router as delivery_router
-
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI(title="Sirius.Food API")
-
-app.include_router(users_router, prefix="/users", tags=["users"])
-app.include_router(menu_router, prefix="/menu", tags=["menu"])
-app.include_router(orders_router, prefix="/orders", tags=["orders"])
-app.include_router(delivery_router, prefix="/delivery", tags=["delivery"])
-```
-
-### A.3. `app/database.py`
-
-```python
-"""
-Модуль инициализации подключения к СУБД PostgreSQL.
-"""
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://sirius:sirius@localhost:5432/sirius_food",
-)
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-def get_db():
-    """Генератор сессии базы данных для использования в Depends."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-```
-
-### A.4. `app/models.py`
-
-```python
-"""
-Определение ORM-моделей предметной области «Сириус.Еда».
-"""
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey
+# app/models.py
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from app.database import Base
 
 
 class User(Base):
+    """Пользователь системы."""
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -383,461 +180,741 @@ class User(Base):
     phone = Column(String, nullable=True)
     balance = Column(Float, default=0.0)
     is_blocked = Column(Boolean, default=False)
+    # Хеш пароля. nullable=True на время миграции — заполним позже.
+    password_hash = Column(String, nullable=True)
+    # Ссылка на роль. nullable=True на время миграции.
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
+
+    role = relationship("Role")
 
 
-class MenuItem(Base):
-    __tablename__ = "menu_items"
+class Role(Base):
+    """Роль пользователя: student, cook, courier, admin."""
+    __tablename__ = "roles"
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    price = Column(Float, nullable=False)
-    is_available = Column(Boolean, default=True)
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50), unique=True, nullable=False)
 
 
-class Order(Base):
-    __tablename__ = "orders"
+class RefreshToken(Base):
+    """Refresh-токен для обновления access-токена."""
+    __tablename__ = "refresh_tokens"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    item_id = Column(Integer, ForeignKey("menu_items.id"))
-    quantity = Column(Integer, nullable=False)
-    status = Column(String, default="processing")
-
-    user = relationship("User")
-    item = relationship("MenuItem")
-
-
-class Delivery(Base):
-    __tablename__ = "deliveries"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"))
-    courier_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    status = Column(String, default="pending")
-
-    order = relationship("Order")
-    courier = relationship("User")
+    # Храним хеш токена, а не сам токен — на случай утечки БД.
+    token_hash = Column(String, unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_revoked = Column(Boolean, default=False)
 ```
 
-### A.5. `app/schemas.py`
+##### 1.3. Сгенерировать миграцию
+
+Alembic сравнит модели с текущей схемой БД и создаст файл миграции в папке `alembic/versions/`.
+
+```bash
+alembic revision --autogenerate -m "add password_hash, roles, refresh_tokens"
+```
+
+Что произойдёт: в `alembic/versions/` появится новый файл. Его имя содержит случайный хеш и твоё сообщение, например:
+
+```text
+alembic/versions/8f3a2b1c4d5e_add_password_hash_roles_refresh_tokens.py
+```
+
+Важно: файл создаётся автоматически. Не создавай его вручную — в нём есть служебные поля (`revision`, `down_revision`), которые связывают миграции в цепочку.
+
+##### 1.4. Отредактировать файл миграции
+
+Что делаем: открываем созданный файл в `alembic/versions/` и дорабатываем функции `upgrade()` и `downgrade()`.
+
+Зачем: Alembic не знает, что нужно заполнить роли или назначить их существующим пользователям. Без этого миграция упадёт на этапе NOT NULL — потому что в БД уже есть пользователи без роли.
+
+Замени содержимое функций на следующий код:
 
 ```python
-"""
-Pydantic-схемы для валидации входных и выходных данных.
-"""
-from pydantic import BaseModel, EmailStr
+def upgrade():
+    # Создаём таблицу ролей.
+    op.create_table(
+        "roles",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("name", sa.String(50), unique=True, nullable=False),
+    )
+
+    # Добавляем колонки в users. Пока nullable=True — заполним ниже.
+    op.add_column("users", sa.Column("password_hash", sa.String(), nullable=True))
+    op.add_column("users", sa.Column("role_id", sa.Integer(), nullable=True))
+    op.create_foreign_key("fk_users_role", "users", "roles", ["role_id"], ["id"])
+
+    # Создаём таблицу refresh-токенов.
+    op.create_table(
+        "refresh_tokens",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id")),
+        sa.Column("token_hash", sa.String(), unique=True, nullable=False),
+        sa.Column("expires_at", sa.DateTime(), nullable=False),
+        sa.Column("is_revoked", sa.Boolean(), server_default="false"),
+    )
+
+    # Заполняем роли.
+    op.execute(
+        "INSERT INTO roles (name) VALUES ('student'), ('cook'), ('courier'), ('admin')"
+    )
+    # Назначаем всем существующим пользователям роль student.
+    op.execute(
+        "UPDATE users SET role_id = (SELECT id FROM roles WHERE name = 'student')"
+    )
+
+    # Теперь можно сделать колонки обязательными.
+    op.alter_column("users", "role_id", nullable=False)
+    op.alter_column("users", "password_hash", nullable=False)
 
 
-class UserCreate(BaseModel):
-    email: EmailStr
-    phone: str | None = None
+def downgrade():
+    op.drop_table("refresh_tokens")
+    op.drop_constraint("fk_users_role", "users", type_="foreignkey")
+    op.drop_column("users", "role_id")
+    op.drop_column("users", "password_hash")
+    op.drop_table("roles")
+```
+
+##### 1.5. Применить миграцию
+
+```bash
+alembic upgrade head
+```
+
+Результат: в БД появились таблицы `roles` и `refresh_tokens`, в `users` добавлены колонки `password_hash` и `role_id`.
+
+#### Шаг 2. Хеширование паролей
+
+Что делаем: реализуем хеширование паролей через bcrypt.
+
+Зачем: хранить пароли в открытом виде нельзя. Если БД утечёт — злоумышленник получит все пароли. Хеш необратим: из него нельзя восстановить исходный пароль, но можно проверить его соответствие.
+
+##### 2.1. Создать модуль app/core/security.py
+
+```python
+# app/core/security.py
+from passlib.context import CryptContext
+
+# Контекст для хеширования. bcrypt — современный алгоритм с солью.
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-class UserResponse(BaseModel):
-    id: int
-    email: str
-    balance: float
+def hash_password(password: str) -> str:
+    """Возвращает bcrypt-хеш пароля."""
+    return pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """Проверяет соответствие пароля хешу."""
+    return pwd_context.verify(plain, hashed)
+```
+
+##### 2.2. Обновить UserService.register()
+
+Что делаем: при регистрации хешируем пароль и назначаем роль `student`.
+
+```python
+# app/modules/users/service.py
+from app.core.security import hash_password
+
+
+class UserService:
+    def __init__(self, repository: UserRepository):
+        self.repository = repository
+
+    def register(self, email: str, password: str, phone: str | None = None) -> User:
+        existing = self.repository.get_by_email(email)
+        if existing:
+            raise EmailAlreadyExistsError()
+
+        user = User(
+            email=email,
+            phone=phone,
+            balance=0.0,
+            is_blocked=False,
+            password_hash=hash_password(password),
+            role_id=self.repository.get_role_id("student"),
+        )
+        self.repository.save(user)
+        return user
+```
+
+Результат: пароли в БД хранятся в виде bcrypt-хешей. В открытом виде — нигде.
+
+#### Шаг 3. JWT: логин и выдача токенов
+
+Что делаем: реализуем эндпоинт `POST /auth/login`, который выдаёт пару токенов.
+
+Зачем: клиент предъявляет логин и пароль один раз — и получает токен. Дальше он использует токен для всех запросов. Это безопаснее, чем передавать пароль при каждом запросе.
+
+##### 3.1. Создать модуль app/core/config.py
+
+Что делаем: выносим настройки в отдельный модуль, читаем их из `.env`.
+
+Зачем: секреты не должны быть в коде. `SECRET_KEY` — обязательное поле: приложение не запустится без него. Это принцип Secure by Default.
+
+```python
+# app/core/config.py
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    """Настройки приложения, загружаемые из .env."""
+    SECRET_KEY: str
+    DATABASE_URL: str
+    REDIS_URL: str = "redis://localhost:6379"
+    DEBUG: bool = False
+    ALLOWED_ORIGINS: list[str] = []
 
     class Config:
-        from_attributes = True
+        env_file = ".env"
 
 
-class MenuItemCreate(BaseModel):
-    name: str
-    price: float
-
-
-class MenuItemUpdate(BaseModel):
-    name: str | None = None
-    price: float | None = None
-    is_available: bool | None = None
-
-
-class OrderCreate(BaseModel):
-    user_id: int
-    item_id: int
-    quantity: int
-
-
-class DeliveryAssign(BaseModel):
-    order_id: int
-    courier_id: int
+settings = Settings()
 ```
 
-### A.6. `app/modules/orders/router.py` (MVP-версия)
+##### 3.2. Создать файл .env
+
+```text
+SECRET_KEY=your-super-secret-key-change-in-production
+DATABASE_URL=postgresql://sirius:sirius@localhost:5432/sirius_food
+REDIS_URL=redis://localhost:6379
+DEBUG=False
+ALLOWED_ORIGINS=["https://sirius-food.ru"]
+```
+
+Важно: `.env` не должен попадать в Git. Убедись, что он в `.gitignore`.
+
+##### 3.3. Создать модуль app/core/jwt.py
+
+Что делаем: реализуем создание и декодирование токенов.
+
+Зачем: access-токен живёт 15 минут (если украдут — быстро сгорит), refresh-токен — 7 дней (нужен для получения нового access).
 
 ```python
-"""
-Модуль управления заказами.
-В исходной MVP-версии содержит смешение слоёв: HTTP-обработка,
-бизнес-проверки и SQL-запросы находятся в одной функции.
-"""
-from fastapi import APIRouter, Depends, HTTPException
+# app/core/jwt.py
+from datetime import datetime, timedelta
+from jose import jwt
+
+from app.core.config import settings
+
+ALGORITHM = "HS256"
+
+
+def create_access_token(user_id: int) -> str:
+    """Создаёт короткоживущий access-токен (15 минут)."""
+    payload = {
+        "sub": str(user_id),
+        "exp": datetime.utcnow() + timedelta(minutes=15),
+        "type": "access",
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(user_id: int) -> str:
+    """Создаёт долгоживущий refresh-токен (7 дней)."""
+    payload = {
+        "sub": str(user_id),
+        "exp": datetime.utcnow() + timedelta(days=7),
+        "type": "refresh",
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    """Декодирует и проверяет подпись токена."""
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+##### 3.4. Создать модуль auth с эндпоинтами
+
+Что делаем: создаём отдельный модуль для аутентификации. Он не относится ни к `users`, ни к `orders` — это самостоятельная зона ответственности.
+
+```python
+# app/modules/auth/router.py
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.models import Order, User, MenuItem
-from app.schemas import OrderCreate
+from app.modules.auth.repository import AuthRepository
+from app.modules.auth.service import AuthService
 
 router = APIRouter()
+
+
+class LoginSchema(BaseModel):
+    """Схема запроса на вход."""
+    email: EmailStr
+    password: str
+
+
+class RefreshSchema(BaseModel):
+    """Схема запроса на обновление токена."""
+    refresh_token: str
+
+
+@router.post("/auth/login")
+def login(payload: LoginSchema, db: Session = Depends(get_db)):
+    """Аутентификация пользователя и выдача пары токенов."""
+    repository = AuthRepository(db)
+    service = AuthService(repository)
+    return service.login(payload.email, payload.password)
+```
+
+##### 3.5. Реализовать AuthService
+
+Что делаем: проверяем email и пароль, выдаём токены.
+
+```python
+# app/modules/auth/service.py
+from app.core.jwt import create_access_token, create_refresh_token
+from app.core.security import verify_password
+
+
+class InvalidCredentialsError(Exception):
+    """Неверный email или пароль."""
+    pass
+
+
+class AuthService:
+    def __init__(self, repository: AuthRepository):
+        self.repository = repository
+
+    def login(self, email: str, password: str) -> dict:
+        """Проверяет учётные данные и возвращает пару токенов."""
+        user = self.repository.get_by_email(email)
+        if not user or not verify_password(password, user.password_hash):
+            raise InvalidCredentialsError()
+
+        access_token = create_access_token(user.id)
+        refresh_token = create_refresh_token(user.id)
+
+        # Сохраняем refresh-токен в БД для возможности отзыва.
+        self.repository.save_refresh_token(user.id, refresh_token)
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+        }
+```
+
+Результат: клиент получает пару токенов. Access — для запросов, refresh — для обновления.
+
+#### Шаг 4. get_current_user — защита эндпоинтов
+
+Что делаем: реализуем dependency, которая извлекает пользователя из JWT и защищает эндпоинты.
+
+Зачем: без этой dependency эндпоинты не знают, кто делает запрос. `user_id` из payload — недоверенный источник, его можно подделать. `user_id` из JWT — доверенный, потому что токен подписан сервером.
+
+##### 4.1. Создать app/core/dependencies.py
+
+```python
+# app/core/dependencies.py
+from fastapi import Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError
+from sqlalchemy.orm import Session
+
+from app.core.jwt import decode_token
+from app.database import get_db
+from app.models import User
+
+# Схема извлечения токена из заголовка Authorization.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Извлекает текущего пользователя из JWT.
+    Возбуждает HTTPException 401, если токен невалиден.
+    """
+    try:
+        payload = decode_token(token)
+        user_id = int(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(401, "Invalid token")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(401, "User not found")
+    if user.is_blocked:
+        raise HTTPException(403, "User is blocked")
+    return user
+```
+
+##### 4.2. Защитить эндпоинты в orders/router.py
+
+Что делаем: добавляем `Depends(get_current_user)` в эндпоинт создания заказа.
+
+```python
+# app/modules/orders/router.py
+from app.core.dependencies import get_current_user
 
 
 @router.post("/create")
-def create_order(payload: OrderCreate, db: Session = Depends(get_db)):
-    # Блок 1: Первичная техническая валидация параметров запроса.
-    if payload.quantity <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Количество должно быть больше нуля",
-        )
-
-    # Блок 2: Бизнес-проверки предметной области с обращением к СУБД.
-    user = db.query(User).filter(User.id == payload.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    item = db.query(MenuItem).filter(MenuItem.id == payload.item_id).first()
-    if not item:
-        raise HTTPException(status_code=404, detail="Блюдо не найдено")
-
-    if not item.is_available:
-        raise HTTPException(status_code=400, detail="Блюдо недоступно")
-
-    total_cost = item.price * payload.quantity
-    if user.balance < total_cost:
-        raise HTTPException(
-            status_code=400,
-            detail="Недостаточно средств на балансе студента",
-        )
-
-    # Блок 3: Инфраструктурный код сохранения изменений.
-    user.balance -= total_cost
-
-    new_order = Order(
-        user_id=payload.user_id,
-        item_id=payload.item_id,
-        quantity=payload.quantity,
-        status="processing",
-    )
-    db.add(new_order)
-    db.commit()
-    db.refresh(new_order)
-
-    return {"status": "success", "order_id": new_order.id}
-```
-
-### A.7. `app/modules/users/router.py` (MVP-версия)
-
-```python
-"""
-Модуль управления пользователями.
-В исходной MVP-версии содержит смешение слоёв.
-"""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models import User
-from app.schemas import UserCreate
-
-router = APIRouter()
-
-
-@router.post("/register")
-def register_user(payload: UserCreate, db: Session = Depends(get_db)):
-    # Проверка корректности email выполняется Pydantic (EmailStr).
-    # Проверка уникальности email требует обращения к СУБД.
-    existing = db.query(User).filter(User.email == payload.email).first()
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="Пользователь с таким email уже зарегистрирован",
-        )
-
-    # Техническая проверка наличия телефона.
-    if payload.phone and len(payload.phone) < 10:
-        raise HTTPException(
-            status_code=400,
-            detail="Некорректный формат номера телефона",
-        )
-
-    # Создание пользователя с нулевым балансом.
-    new_user = User(
-        email=payload.email,
-        phone=payload.phone,
-        balance=0.0,
-        is_blocked=False,
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return {
-        "status": "success",
-        "user_id": new_user.id,
-        "email": new_user.email,
-    }
-
-
-@router.post("/{user_id}/topup")
-def top_up_balance(user_id: int, amount: float, db: Session = Depends(get_db)):
-    # Техническая проверка положительности суммы пополнения.
-    if amount <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Сумма пополнения должна быть положительной",
-        )
-
-    # Бизнес-правило: пополнение запрещено для заблокированных пользователей.
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    if user.is_blocked:
-        raise HTTPException(
-            status_code=403,
-            detail="Пользователь заблокирован. Пополнение невозможно",
-        )
-
-    # Бизнес-правило: максимальная сумма одного пополнения.
-    if amount > 50000:
-        raise HTTPException(
-            status_code=400,
-            detail="Максимальная сумма пополнения — 50000 рублей",
-        )
-
-    user.balance += amount
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    return {"status": "success", "new_balance": user.balance}
-```
-
-### A.8. `app/modules/menu/router.py` (MVP-версия)
-
-```python
-"""
-Модуль управления меню столовой.
-В исходной MVP-версии содержит смешение слоёв.
-"""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models import MenuItem
-from app.schemas import MenuItemCreate, MenuItemUpdate
-
-router = APIRouter()
-
-
-@router.post("/items")
-def create_menu_item(payload: MenuItemCreate, db: Session = Depends(get_db)):
-    # Техническая валидация цены и названия.
-    if payload.price <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Цена должна быть положительной",
-        )
-
-    if len(payload.name) < 2:
-        raise HTTPException(
-            status_code=400,
-            detail="Название блюда слишком короткое",
-        )
-
-    # Бизнес-правило: название блюда должно быть уникальным.
-    existing = db.query(MenuItem).filter(MenuItem.name == payload.name).first()
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="Блюдо с таким названием уже существует",
-        )
-
-    new_item = MenuItem(
-        name=payload.name,
-        price=payload.price,
-        is_available=True,
-    )
-    db.add(new_item)
-    db.commit()
-    db.refresh(new_item)
-
-    return {"status": "success", "item_id": new_item.id}
-
-
-@router.patch("/items/{item_id}")
-def update_menu_item(
-    item_id: int,
-    payload: MenuItemUpdate,
+def create_order(
+    payload: OrderCreate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Поиск обновляемого блюда.
-    item = db.query(MenuItem).filter(MenuItem.id == item_id).first()
-    if not item:
-        raise HTTPException(status_code=404, detail="Блюдо не найдено")
-
-    # Техническая валидация нового значения цены.
-    if payload.price is not None and payload.price <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Цена должна быть положительной",
-        )
-
-    # Применение изменений.
-    if payload.name is not None:
-        item.name = payload.name
-    if payload.price is not None:
-        item.price = payload.price
-    if payload.is_available is not None:
-        item.is_available = payload.is_available
-
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-
-    return {"status": "success", "item_id": item.id}
+    repository = OrderRepository(db)
+    service = OrderService(repository)
+    order_id = service.create_order(
+        user_id=current_user.id,
+        item_id=payload.item_id,
+        quantity=payload.quantity,
+    )
+    return {"status": "success", "order_id": order_id}
 ```
 
-### A.9. `app/modules/delivery/router.py` (MVP-версия)
+##### 4.3. Убрать user_id из Pydantic-схемы OrderCreate
+
+Что делаем: удаляем `user_id` из схемы. Теперь клиент не сообщает, кто он — это определяет сервер из токена.
 
 ```python
-"""
-Модуль управления доставкой.
-В исходной MVP-версии содержит смешение слоёв.
-"""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models import Delivery, Order, User
-from app.schemas import DeliveryAssign
+# app/schemas.py
+class OrderCreate(BaseModel):
+    item_id: int
+    quantity: int
+```
 
-router = APIRouter()
+Результат: эндпоинт требует токен. Без токена — 401. `user_id` больше не приходит от клиента.
+
+#### Шаг 5. RBAC: роли и права
+
+Что делаем: реализуем проверку роли через dependency.
+
+Зачем: аутентификация отвечает на вопрос «кто ты». Но она не отвечает на вопрос «что тебе можно». Студент аутентифицирован — но он не должен видеть кухню. Для этого нужна авторизация по ролям.
+
+##### 5.1. Создать require_role
+
+```python
+# app/core/dependencies.py
+def require_role(required_role: str):
+    """
+    Dependency для проверки роли пользователя.
+    Возбуждает HTTPException 403, если роль не совпадает.
+    """
+    def checker(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role.name != required_role:
+            raise HTTPException(403, "Access denied")
+        return current_user
+    return checker
+```
+
+##### 5.2. Защитить эндпоинты кухни
+
+Что делаем: закрываем эндпоинт `GET /kitchen/orders` ролью `cook`.
+
+```python
+# app/modules/orders/router.py
+@router.get("/kitchen/orders")
+def kitchen_orders(
+    current_user: User = Depends(require_role("cook")),
+    db: Session = Depends(get_db),
+):
+    repository = OrderRepository(db)
+    service = OrderService(repository)
+    return service.get_kitchen_orders()
+```
+
+Результат: студент не может видеть кухню — получит 403.
+
+#### Шаг 6. Защита от IDOR в Service-слое
+
+Что делаем: проверяем права на конкретный объект в слое бизнес-логики.
+
+Зачем: это бизнес-правило, а не HTTP-валидация. Оно требует сравнения `order.customer_id` и `current_user.id`. Такая проверка должна быть в Service, а не в роутере — иначе её нельзя протестировать без HTTP и переиспользовать в CLI или воркере.
+
+##### 6.1. Создать доменные исключения
+
+```python
+# app/modules/orders/exceptions.py
+class OrderNotFoundError(Exception):
+    """Заказ не найден."""
+    pass
 
 
-@router.post("/assign")
-def assign_courier(payload: DeliveryAssign, db: Session = Depends(get_db)):
-    # Проверка существования заказа.
-    order = db.query(Order).filter(Order.id == payload.order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Заказ не найден")
+class AccessDeniedError(Exception):
+    """Пользователь не имеет прав на этот объект."""
+    pass
+```
 
-    # Бизнес-правило: назначить курьера можно только на оплаченный заказ.
-    if order.status != "paid":
-        raise HTTPException(
-            status_code=400,
-            detail="Курьера можно назначить только на оплаченный заказ",
-        )
+##### 6.2. Обновить OrderService.cancel_order()
 
-    # Проверка существования курьера.
-    courier = db.query(User).filter(User.id == payload.courier_id).first()
-    if not courier:
-        raise HTTPException(status_code=404, detail="Курьер не найден")
-
-    if courier.is_blocked:
-        raise HTTPException(
-            status_code=403,
-            detail="Курьер заблокирован и не может быть назначен",
-        )
-
-    # Бизнес-правило: один курьер — одна активная доставка.
-    active = db.query(Delivery).filter(
-        Delivery.courier_id == payload.courier_id,
-        Delivery.status == "in_progress",
-    ).first()
-    if active:
-        raise HTTPException(
-            status_code=400,
-            detail="У курьера уже есть активная доставка",
-        )
-
-    # Создание записи о доставке.
-    new_delivery = Delivery(
-        order_id=payload.order_id,
-        courier_id=payload.courier_id,
-        status="in_progress",
-    )
-    db.add(new_delivery)
-    db.commit()
-    db.refresh(new_delivery)
-
-    return {"status": "success", "delivery_id": new_delivery.id}
+```python
+# app/modules/orders/service.py
+from app.modules.orders.exceptions import AccessDeniedError, OrderNotFoundError
 
 
-@router.patch("/{delivery_id}/complete")
-def complete_delivery(delivery_id: int, db: Session = Depends(get_db)):
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
-    if not delivery:
-        raise HTTPException(status_code=404, detail="Доставка не найдена")
+class OrderService:
+    def __init__(self, repository: OrderRepository):
+        self.repository = repository
 
-    if delivery.status == "completed":
-        raise HTTPException(
-            status_code=400,
-            detail="Доставка уже завершена",
-        )
+    def cancel_order(self, order_id: int, current_user: User) -> Order:
+        """
+        Отменяет заказ. Проверяет, что заказ принадлежит текущему пользователю.
+        Возбуждает OrderNotFoundError или AccessDeniedError.
+        """
+        order = self.repository.get_order(order_id)
+        if order is None:
+            raise OrderNotFoundError()
+        if order.customer_id != current_user.id:
+            raise AccessDeniedError()
+        order.cancel()
+        self.repository.save(order)
+        return order
+```
 
-    if delivery.status == "cancelled":
-        raise HTTPException(
-            status_code=400,
-            detail="Отменённую доставку нельзя завершить",
-        )
+##### 6.3. Транслировать исключения в HTTP-статусы в роутере
 
-    delivery.status = "completed"
+```python
+# app/modules/orders/router.py
+from app.modules.orders.exceptions import AccessDeniedError, OrderNotFoundError
 
-    # Синхронное обновление статуса заказа.
-    order = db.query(Order).filter(Order.id == delivery.order_id).first()
-    if order:
-        order.status = "delivered"
-        db.add(order)
 
-    db.add(delivery)
-    db.commit()
-
+@router.post("/{order_id}/cancel")
+def cancel_order(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    repository = OrderRepository(db)
+    service = OrderService(repository)
+    try:
+        service.cancel_order(order_id, current_user)
+    except OrderNotFoundError:
+        raise HTTPException(404, "Order not found")
+    except AccessDeniedError:
+        raise HTTPException(403, "Access denied")
     return {"status": "success"}
 ```
 
-### A.10. `docker-compose.yml`
+Результат: IDOR закрыт. Студент А не может отменить заказ студента Б.
 
-```yaml
-version: "3.9"
+#### Шаг 7 (бонус, 9 баллов). Защита API
 
-services:
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: sirius
-      POSTGRES_PASSWORD: sirius
-      POSTGRES_DB: sirius_food
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
+Что делаем: добавляем rate limiting, ограничиваем CORS, отключаем Swagger в продакшене.
 
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
+Зачем: эти меры защищают от массовых атак (брутфорс, спам) и снижают поверхность атаки.
 
-volumes:
-  pg_data:
+##### 7.1. Rate Limiting на Redis
+
+Почему Redis, а не память приложения: если приложение запущено в нескольких репликах, у каждой будет свой счётчик. Пользователь сможет сделать 5 попыток на одной реплике и ещё 5 на другой. Redis хранит общее состояние для всех реплик.
+
+```python
+# app/core/rate_limit.py
+from fastapi import HTTPException, Request
+from redis import Redis
+
+from app.core.config import settings
+
+redis_client = Redis.from_url(settings.REDIS_URL)
+
+
+def rate_limit(max_requests: int = 5, window: int = 60):
+    """
+    Dependency для ограничения частоты запросов.
+    Возбуждает HTTPException 429 при превышении лимита.
+    """
+    def checker(request: Request):
+        ip = request.client.host
+        key = f"rate_limit:{ip}:{request.url.path}"
+        current = redis_client.incr(key)
+        if current == 1:
+            redis_client.expire(key, window)
+        if current > max_requests:
+            raise HTTPException(429, "Too many requests")
+    return checker
 ```
 
-### A.11. `requirements.txt`
+Применить к эндпоинтам:
 
-```text
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-sqlalchemy==2.0.29
-psycopg2-binary==2.9.9
-pydantic[email]==2.6.4
-python-dotenv==1.0.1
+```python
+@router.post("/auth/login", dependencies=[Depends(rate_limit(5, 60))])
+def login(...):
+    ...
 ```
 
-## Приложение Б. Рекомендуемая структура после рефакторинга модуля `orders`
+##### 7.2. CORS и отключение Swagger
+
+Что делаем: в продакшене Swagger не нужен — он раскрывает структуру API. CORS ограничиваем только своим доменом.
+
+```python
+# app/main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import settings
+
+app = FastAPI(
+    title="Sirius.Food API",
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url=None,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+```
+
+Результат: система защищена на уровне конфигурации.
+
+#### Шаг 8 (бонус, 10 баллов). Одно задание на выбор
+
+##### Вариант А. Refresh Token rotation
+
+Что делаем: при каждом обновлении токена старый refresh-токен инвалидируется, выдаётся новый.
+
+Зачем: если злоумышленник украл refresh-токен и попытается его использовать — старая сессия уже недействительна. При повторном использовании старого токена вся сессия сбрасывается.
+
+Что нужно реализовать:
+
+- Эндпоинт `POST /auth/refresh`, который принимает refresh-токен.
+- Проверка токена в БД: если он уже `is_revoked` — сбросить всю сессию пользователя.
+- Выдача новой пары токенов.
+- Инвалидация старого refresh-токена.
+
+##### Вариант Б. Защита второго модуля
+
+Что делаем: полностью защищаем модуль `users` или `delivery` по образцу `orders`.
+
+Что нужно сделать:
+
+- Защитить все эндпоинты через `Depends(get_current_user)`.
+- Реализовать проверку прав на объект в Service.
+- Добавить роли (`require_role`) там, где это нужно.
+
+##### Вариант В. OAuth2 через внешнего провайдера
+
+Что делаем: подключаем вход через Google или VK.
+
+Зачем: пользователь не хранит пароль в нашей БД — аутентификация делегируется провайдеру.
+
+Что нужно сделать:
+
+- Зарегистрировать приложение в Google Cloud Console или VK ID.
+- Реализовать Authorization Code Flow.
+- Связать внешний аккаунт с нашим пользователем.
+
+Документация: https://fastapi.tiangolo.com/advanced/security/oauth2-scopes/
+
+### 5. Проверка работоспособности
+
+После внедрения безопасности проект должен сохранять полную работоспособность и одновременно блокировать несанкционированные действия.
+
+Порядок проверки:
+
+- Перезапустить сервер: `uvicorn app.main:app --reload`.
+- Открыть `http://127.0.0.1:8000/docs`.
+- Сценарий 1: без токена вызвать `POST /orders/create` — получить 401.
+- Сценарий 2: залогиниться как студент, получить токен, создать заказ — успех.
+- Сценарий 3: залогиниться как второй студент, попытаться отменить заказ первого — получить 403.
+- Сценарий 4: залогиниться как студент, вызвать `GET /kitchen/orders` — получить 403.
+- Сценарий 5 (бонус): 6 раз подряд вызвать `POST /auth/login` с неверным паролем — на 6-й раз получить 429.
+
+### 6. Задание для самостоятельной работы
+
+Выполнить защиту оставшихся модулей пет-проекта «Сириус.Еда»:
+
+- `users` — регистрация с хешированием пароля, аутентификация, роли.
+- `menu` — доступ на изменение только для роли `admin` или `cook`.
+- `delivery` — курьер видит только свои доставки; студент не может видеть доставку чужого заказа.
+
+Требования к выполнению:
+
+- Все эндпоинты, изменяющие данные, защищены через `Depends(get_current_user)`.
+- Проверка роли реализована через `require_role`.
+- Проверка прав на объект реализована в Service-слое.
+- Хеширование паролей через bcrypt.
+- Проект работает в Swagger, структура ответов не изменилась для авторизованных пользователей.
+- Написаны тесты на безопасность (не менее 4):
+  - без токена — 401;
+  - чужая роль — 403;
+  - чужой объект — 403;
+  - rate limiting — 429 (бонус).
+
+Задание сдаётся в виде:
+
+- репозитория Git с историей коммитов;
+- файла `README.md` с описанием изменений и схемой безопасности;
+- тестов на безопасность, проходящих в CI;
+- устной защиты с ответами на контрольные вопросы.
+
+### 7. Контрольные вопросы для защиты работы
+
+- Чем аутентификация отличается от авторизации? Приведите пример ошибки на каждом уровне.
+- Почему `user_id` убирают из payload запроса и берут из JWT?
+- Что такое IDOR и на каком слое архитектуры от него защищаются? Обоснуйте выбор слоя.
+- Почему payload JWT нельзя считать защищённым, несмотря на то что он передаётся в токене?
+- Почему проверка роли реализована в API-слое, а проверка прав на объект — в Service-слое?
+- Зачем нужен rate limiting на Redis, а не в памяти приложения?
+- Что такое Secure by Default? Приведите три примера из проекта.
+- Какое из следующих утверждений нарушает правило зависимостей Clean Architecture и почему: «`service.py` импортирует `HTTPException` из `fastapi` для возврата ошибки 403»?
+
+## Приложение А. Структура проекта после внедрения безопасности
 
 ```text
 app/
-└── modules/
-    └── orders/
-        ├── __init__.py
-        ├── router.py       # Транспортный слой
-        ├── service.py      # Слой бизнес-логики
-        └── repository.py   # Инфраструктурный слой
+├── core/
+│   ├── config.py         # Pydantic Settings
+│   ├── jwt.py            # create_access_token, create_refresh_token, decode_token
+│   ├── security.py       # hash_password, verify_password
+│   ├── dependencies.py   # get_current_user, require_role
+│   └── rate_limit.py     # rate_limit dependency
+├── modules/
+│   ├── auth/
+│   │   ├── router.py
+│   │   ├── service.py
+│   │   └── repository.py
+│   ├── users/
+│   │   ├── router.py
+│   │   ├── service.py
+│   │   └── repository.py
+│   ├── menu/
+│   │   ├── router.py
+│   │   ├── service.py
+│   │   └── repository.py
+│   ├── orders/
+│   │   ├── router.py
+│   │   ├── service.py
+│   │   ├── repository.py
+│   │   └── exceptions.py
+│   └── delivery/
+│       ├── router.py
+│       ├── service.py
+│       └── repository.py
+├── main.py
+├── database.py
+├── models.py
+└── schemas.py
+```
+
+## Приложение Б. Дополнительные зависимости
+
+```text
+# requirements.txt
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+sqlalchemy==2.0.41
+psycopg2-binary==2.9.11
+pydantic[email]==2.13.0
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+alembic==1.13.1
+redis==5.0.3
 ```
