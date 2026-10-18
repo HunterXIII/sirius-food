@@ -14,6 +14,13 @@ from app.modules.menu.service import MenuService
 router = APIRouter()
 
 
+@router.get("/items")
+def get_menu_items(db: Session = Depends(get_db)):
+    # Меню не секрет: смотреть его можно без токена.
+    service = MenuService(get_menu_repository(db))
+    return service.get_menu()
+
+
 @router.post("/items")
 def create_menu_item(
     payload: MenuItemCreate,

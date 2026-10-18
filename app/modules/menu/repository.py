@@ -12,6 +12,16 @@ from app.core.config import settings
 from app.models import MenuItem
 
 
+def item_to_dict(item) -> dict:
+    """Блюдо (ORM-объект или запись memory_db) -> словарь для ответа API."""
+    return {
+        "id": item.id,
+        "name": item.name,
+        "price": item.price,
+        "is_available": item.is_available,
+    }
+
+
 class MenuRepository(ABC):
     """Абстрактный интерфейс репозитория меню."""
 
@@ -30,6 +40,10 @@ class MenuRepository(ABC):
     @abstractmethod
     def update_item(self, item) -> None:
         """Сохранить изменения блюда."""
+
+    @abstractmethod
+    def get_all_items(self) -> list[dict]:
+        """Всё меню списком словарей (отсортировано по id)."""
 
 
 class PostgresMenuRepository(MenuRepository):
@@ -60,6 +74,10 @@ class PostgresMenuRepository(MenuRepository):
         self.db.commit()
         self.db.refresh(item)
 
+    def get_all_items(self) -> list[dict]:
+        items = self.db.query(MenuItem).order_by(MenuItem.id).all()
+        return [item_to_dict(item) for item in items]
+
 
 class InMemoryMenuRepository(MenuRepository):
     """Реализация, которая хранит данные в памяти (app/memory_db.py)."""
@@ -85,6 +103,10 @@ class InMemoryMenuRepository(MenuRepository):
 
     def update_item(self, item) -> None:
         memory_db.menu_items[item.id] = item
+
+    def get_all_items(self) -> list[dict]:
+        items = sorted(memory_db.menu_items.values(), key=lambda item: item.id)
+        return [item_to_dict(item) for item in items]
 
 
 def get_menu_repository(db: Session) -> MenuRepository:

@@ -13,6 +13,10 @@ class MenuService:
         # Инверсия зависимостей: репозиторий передают через конструктор.
         self.repository = repository
 
+    def get_menu(self) -> list[dict]:
+        """Всё меню. Откуда данные (БД или кеш), сервис не знает."""
+        return self.repository.get_all_items()
+
     def create_item(self, name: str, price: float) -> int:
         """
         Добавление блюда в меню. Возвращает id блюда.
