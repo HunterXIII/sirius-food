@@ -51,6 +51,10 @@ class MenuRepository(ABC):
     def get_all_items(self) -> list[dict]:
         """Всё меню списком словарей (отсортировано по id)."""
 
+    @abstractmethod
+    def invalidate_cache(self) -> None:
+        """Сбросить кеш меню (вызывается после изменения меню)."""
+
 
 class PostgresMenuRepository(MenuRepository):
     """
@@ -103,6 +107,10 @@ class PostgresMenuRepository(MenuRepository):
         redis_client.setex(MENU_ALL_KEY, MENU_ALL_TTL, json.dumps(items_data, ensure_ascii=False))
         return items_data
 
+    def invalidate_cache(self) -> None:
+        """Сбрасывает кеш меню."""
+        redis_client.delete(MENU_ALL_KEY)
+
 
 class InMemoryMenuRepository(MenuRepository):
     """Реализация, которая хранит данные в памяти (app/memory_db.py)."""
@@ -132,6 +140,10 @@ class InMemoryMenuRepository(MenuRepository):
     def get_all_items(self) -> list[dict]:
         items = sorted(memory_db.menu_items.values(), key=lambda item: item.id)
         return [item_to_dict(item) for item in items]
+
+    def invalidate_cache(self) -> None:
+        # Кеша у in-memory реализации нет, сбрасывать нечего.
+        pass
 
 
 def get_menu_repository(db: Session) -> MenuRepository:

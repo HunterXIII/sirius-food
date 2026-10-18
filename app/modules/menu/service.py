@@ -26,7 +26,10 @@ class MenuService:
             raise ValueError("Блюдо с таким названием уже существует")
 
         # Новое блюдо сразу доступно для заказа.
-        return self.repository.save_item(name=name, price=price, is_available=True)
+        item_id = self.repository.save_item(name=name, price=price, is_available=True)
+        # Инвалидация кеша: меню изменилось
+        self.repository.invalidate_cache()
+        return item_id
 
     def update_item(
         self,
@@ -51,4 +54,6 @@ class MenuService:
             item.is_available = is_available
 
         self.repository.update_item(item)
+        # Инвалидация кеша: меню изменилось
+        self.repository.invalidate_cache()
         return item.id
