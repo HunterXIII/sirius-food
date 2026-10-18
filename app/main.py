@@ -3,18 +3,45 @@
 и подключение модулей.
 Таблицы базы данных создаёт Alembic: alembic upgrade head.
 """
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.redis import check_redis_connection
+from app.database import SessionLocal
 from app.modules.auth.router import router as auth_router
 from app.modules.users.router import router as users_router
 from app.modules.menu.router import router as menu_router
+from app.modules.menu.repository import get_menu_repository
 from app.modules.orders.router import router as orders_router
 from app.modules.delivery.router import router as delivery_router
 
+
+def warm_up_menu_cache():
+    """Прогрев кеша (cache warm-up): при старте кладём меню в Redis."""
+    if not check_redis_connection():
+        print("Redis недоступен, прогрев кеша меню пропущен")
+        return
+    db = SessionLocal()
+    try:
+        get_menu_repository(db).warm_up_cache()
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Код до yield выполняется при старте приложения, после yield - при остановке.
+    # Это замена устаревшему @app.on_event("startup").
+    warm_up_menu_cache()
+    yield
+
+
 app = FastAPI(
     title="Sirius.Food API",
+    lifespan=lifespan,
     # Swagger раскрывает структуру API, поэтому он есть только при DEBUG=True.
     # openapi.json тоже выключаем: по нему Swagger и строится.
     docs_url="/docs" if settings.DEBUG else None,
@@ -38,3 +65,4 @@ app.include_router(users_router, prefix="/users", tags=["users"])
 app.include_router(menu_router, prefix="/menu", tags=["menu"])
 app.include_router(orders_router, prefix="/orders", tags=["orders"])
 app.include_router(delivery_router, prefix="/delivery", tags=["delivery"])
+

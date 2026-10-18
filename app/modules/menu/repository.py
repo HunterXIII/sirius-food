@@ -7,6 +7,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 
+import redis
 from sqlalchemy.orm import Session
 
 from app import memory_db
@@ -63,6 +64,10 @@ class MenuRepository(ABC):
     def invalidate_cache(self) -> None:
         """Сбросить кеш меню (вызывается после изменения меню)."""
 
+    @abstractmethod
+    def warm_up_cache(self) -> None:
+        """Прогрев кеша при старте приложения."""
+
 
 class PostgresMenuRepository(MenuRepository):
     """
@@ -103,33 +108,38 @@ class PostgresMenuRepository(MenuRepository):
         блокировку lock:<key>, остальные ждут, пока он заполнит кеш.
         load_from_db - функция, которая читает данные из БД.
         """
-        while True:
-            # 1. Проверка кеша
-            cached_data = redis_client.get(key)
-            if cached_data is not None:
-                # Hit: возвращаем данные из кеша
-                return json.loads(cached_data)
+        try:
+            while True:
+                # 1. Проверка кеша
+                cached_data = redis_client.get(key)
+                if cached_data is not None:
+                    # Hit: возвращаем данные из кеша
+                    return json.loads(cached_data)
 
-            # 2. Miss: пробуем взять блокировку, не дожидаясь её.
-            # timeout=10 - если запрос упадёт, блокировка сама снимется через 10 секунд.
-            lock = redis_client.lock(f"lock:{key}", timeout=10)
-            if lock.acquire(blocking=False):
-                try:
-                    # Пока мы брали блокировку, кеш мог заполнить другой запрос.
-                    cached_data = redis_client.get(key)
-                    if cached_data is not None:
-                        return json.loads(cached_data)
-                    # Идём в БД и сохраняем результат в кеш с TTL.
-                    data = load_from_db()
-                    # None (например, категории нет) не кешируем.
-                    if data is not None:
-                        redis_client.setex(key, ttl, json.dumps(data, ensure_ascii=False))
-                    return data
-                finally:
-                    lock.release()
+                # 2. Miss: пробуем взять блокировку, не дожидаясь её.
+                # timeout=10 - если запрос упадёт, блокировка сама снимется через 10 секунд.
+                lock = redis_client.lock(f"lock:{key}", timeout=10)
+                if lock.acquire(blocking=False):
+                    try:
+                        # Пока мы брали блокировку, кеш мог заполнить другой запрос.
+                        cached_data = redis_client.get(key)
+                        if cached_data is not None:
+                            return json.loads(cached_data)
+                        # Идём в БД и сохраняем результат в кеш с TTL.
+                        data = load_from_db()
+                        # None (например, категории нет) не кешируем.
+                        if data is not None:
+                            redis_client.setex(key, ttl, json.dumps(data, ensure_ascii=False))
+                        return data
+                    finally:
+                        lock.release()
 
-            # Блокировку держит другой запрос: ждём и снова смотрим в кеш.
-            time.sleep(0.05)
+                # Блокировку держит другой запрос: ждём и снова смотрим в кеш.
+                time.sleep(0.05)
+        except redis.ConnectionError:
+            # Redis недоступен. Кеш - только ускоритель, поэтому читаем
+            # прямо из БД: приложение работает, но медленнее.
+            return load_from_db()
 
     def get_all_items(self) -> list[dict]:
         """Возвращает всё меню (из кеша, при промахе из БД)."""
@@ -161,11 +171,22 @@ class PostgresMenuRepository(MenuRepository):
 
     def invalidate_cache(self) -> None:
         """Сбрасывает кеш меню: всё меню и все категории."""
-        redis_client.delete(MENU_ALL_KEY)
-        # Блюдо могло перейти из одной категории в другую,
-        # поэтому проще сбросить кеш всех категорий.
-        for key in redis_client.scan_iter("menu:category:*"):
-            redis_client.delete(key)
+        try:
+            redis_client.delete(MENU_ALL_KEY)
+            # Блюдо могло перейти из одной категории в другую,
+            # поэтому проще сбросить кеш всех категорий.
+            for key in redis_client.scan_iter("menu:category:*"):
+                redis_client.delete(key)
+        except redis.ConnectionError:
+            # Redis недоступен - сбрасывать нечего, изменение в БД уже сохранено.
+            pass
+
+    def warm_up_cache(self) -> None:
+        """Заполняет menu:all из БД, чтобы первый запрос не шёл в базу."""
+        # В Redis мог остаться кеш от прошлого запуска, а меню с тех пор
+        # могли поменять прямо в БД. Поэтому сначала сбрасываем.
+        self.invalidate_cache()
+        self.get_all_items()
 
 
 class InMemoryMenuRepository(MenuRepository):
@@ -207,6 +228,10 @@ class InMemoryMenuRepository(MenuRepository):
 
     def invalidate_cache(self) -> None:
         # Кеша у in-memory реализации нет, сбрасывать нечего.
+        pass
+
+    def warm_up_cache(self) -> None:
+        # Кеша нет - прогревать нечего.
         pass
 
 
