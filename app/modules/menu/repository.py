@@ -4,6 +4,7 @@
 Бизнес-правил здесь нет.
 """
 import json
+import time
 from abc import ABC, abstractmethod
 
 from sqlalchemy.orm import Session
@@ -87,25 +88,46 @@ class PostgresMenuRepository(MenuRepository):
         self.db.commit()
         self.db.refresh(item)
 
+    def _cache_aside(self, key: str, ttl: int, load_from_db):
+        """
+        Cache-Aside с защитой от cache stampede.
+        Hit - данные из Redis. Miss - в БД идёт только запрос, который взял
+        блокировку lock:<key>, остальные ждут, пока он заполнит кеш.
+        load_from_db - функция, которая читает данные из БД.
+        """
+        while True:
+            # 1. Проверка кеша
+            cached_data = redis_client.get(key)
+            if cached_data is not None:
+                # Hit: возвращаем данные из кеша
+                return json.loads(cached_data)
+
+            # 2. Miss: пробуем взять блокировку, не дожидаясь её.
+            # timeout=10 - если запрос упадёт, блокировка сама снимется через 10 секунд.
+            lock = redis_client.lock(f"lock:{key}", timeout=10)
+            if lock.acquire(blocking=False):
+                try:
+                    # Пока мы брали блокировку, кеш мог заполнить другой запрос.
+                    cached_data = redis_client.get(key)
+                    if cached_data is not None:
+                        return json.loads(cached_data)
+                    # Идём в БД и сохраняем результат в кеш с TTL.
+                    data = load_from_db()
+                    redis_client.setex(key, ttl, json.dumps(data, ensure_ascii=False))
+                    return data
+                finally:
+                    lock.release()
+
+            # Блокировку держит другой запрос: ждём и снова смотрим в кеш.
+            time.sleep(0.05)
+
     def get_all_items(self) -> list[dict]:
-        """
-        Возвращает всё меню.
-        Сначала проверяет кеш Redis (Cache-Aside).
-        При промахе (miss) идёт в БД и кеширует результат.
-        """
-        # 1. Проверка кеша
-        cached_data = redis_client.get(MENU_ALL_KEY)
-        if cached_data is not None:
-            # Hit: возвращаем данные из кеша
-            return json.loads(cached_data)
+        """Возвращает всё меню (из кеша, при промахе из БД)."""
+        def load_from_db():
+            items = self.db.query(MenuItem).order_by(MenuItem.id).all()
+            return [item_to_dict(item) for item in items]
 
-        # 2. Miss: идём в БД
-        items = self.db.query(MenuItem).order_by(MenuItem.id).all()
-        items_data = [item_to_dict(item) for item in items]
-
-        # 3. Сохраняем в кеш с TTL 5 минут
-        redis_client.setex(MENU_ALL_KEY, MENU_ALL_TTL, json.dumps(items_data, ensure_ascii=False))
-        return items_data
+        return self._cache_aside(MENU_ALL_KEY, MENU_ALL_TTL, load_from_db)
 
     def invalidate_cache(self) -> None:
         """Сбрасывает кеш меню."""
