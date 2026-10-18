@@ -3,13 +3,19 @@
 Только этот файл знает, где и как хранятся блюда.
 Бизнес-правил здесь нет.
 """
+import json
 from abc import ABC, abstractmethod
 
 from sqlalchemy.orm import Session
 
 from app import memory_db
 from app.core.config import settings
+from app.core.redis import redis_client
 from app.models import MenuItem
+
+# Ключ кеша со всем меню и время его жизни (5 минут).
+MENU_ALL_KEY = "menu:all"
+MENU_ALL_TTL = 300
 
 
 def item_to_dict(item) -> dict:
@@ -47,7 +53,10 @@ class MenuRepository(ABC):
 
 
 class PostgresMenuRepository(MenuRepository):
-    """Реализация для PostgreSQL через SQLAlchemy ORM."""
+    """
+    Реализация для PostgreSQL через SQLAlchemy ORM.
+    Чтение меню кешируется в Redis (Cache-Aside).
+    """
 
     def __init__(self, db: Session):
         self.db = db
@@ -75,8 +84,24 @@ class PostgresMenuRepository(MenuRepository):
         self.db.refresh(item)
 
     def get_all_items(self) -> list[dict]:
+        """
+        Возвращает всё меню.
+        Сначала проверяет кеш Redis (Cache-Aside).
+        При промахе (miss) идёт в БД и кеширует результат.
+        """
+        # 1. Проверка кеша
+        cached_data = redis_client.get(MENU_ALL_KEY)
+        if cached_data is not None:
+            # Hit: возвращаем данные из кеша
+            return json.loads(cached_data)
+
+        # 2. Miss: идём в БД
         items = self.db.query(MenuItem).order_by(MenuItem.id).all()
-        return [item_to_dict(item) for item in items]
+        items_data = [item_to_dict(item) for item in items]
+
+        # 3. Сохраняем в кеш с TTL 5 минут
+        redis_client.setex(MENU_ALL_KEY, MENU_ALL_TTL, json.dumps(items_data, ensure_ascii=False))
+        return items_data
 
 
 class InMemoryMenuRepository(MenuRepository):
