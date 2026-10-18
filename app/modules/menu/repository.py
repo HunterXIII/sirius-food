@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from app import memory_db
 from app.core.config import settings
 from app.core.redis import redis_client
-from app.models import MenuItem
+from app.models import Category, MenuItem
 
 # Ключ кеша со всем меню и время его жизни (5 минут).
 MENU_ALL_KEY = "menu:all"
 MENU_ALL_TTL = 300
+# Категория кешируется под ключом menu:category:{id} на 10 минут.
+MENU_CATEGORY_TTL = 600
 
 
 def item_to_dict(item) -> dict:
@@ -26,6 +28,7 @@ def item_to_dict(item) -> dict:
         "name": item.name,
         "price": item.price,
         "is_available": item.is_available,
+        "category_id": item.category_id,
     }
 
 
@@ -41,7 +44,7 @@ class MenuRepository(ABC):
         """Найти блюдо по названию. Если нет - вернуть None."""
 
     @abstractmethod
-    def save_item(self, name: str, price: float, is_available: bool) -> int:
+    def save_item(self, name: str, price: float, is_available: bool, category_id: int | None) -> int:
         """Сохранить новое блюдо и вернуть его id."""
 
     @abstractmethod
@@ -51,6 +54,10 @@ class MenuRepository(ABC):
     @abstractmethod
     def get_all_items(self) -> list[dict]:
         """Всё меню списком словарей (отсортировано по id)."""
+
+    @abstractmethod
+    def get_category(self, category_id: int) -> dict | None:
+        """Категория с её блюдами. Если категории нет - None."""
 
     @abstractmethod
     def invalidate_cache(self) -> None:
@@ -72,11 +79,12 @@ class PostgresMenuRepository(MenuRepository):
     def get_item_by_name(self, name: str):
         return self.db.query(MenuItem).filter(MenuItem.name == name).first()
 
-    def save_item(self, name: str, price: float, is_available: bool) -> int:
+    def save_item(self, name: str, price: float, is_available: bool, category_id: int | None) -> int:
         new_item = MenuItem(
             name=name,
             price=price,
             is_available=is_available,
+            category_id=category_id,
         )
         self.db.add(new_item)
         self.db.commit()
@@ -113,7 +121,9 @@ class PostgresMenuRepository(MenuRepository):
                         return json.loads(cached_data)
                     # Идём в БД и сохраняем результат в кеш с TTL.
                     data = load_from_db()
-                    redis_client.setex(key, ttl, json.dumps(data, ensure_ascii=False))
+                    # None (например, категории нет) не кешируем.
+                    if data is not None:
+                        redis_client.setex(key, ttl, json.dumps(data, ensure_ascii=False))
                     return data
                 finally:
                     lock.release()
@@ -129,9 +139,33 @@ class PostgresMenuRepository(MenuRepository):
 
         return self._cache_aside(MENU_ALL_KEY, MENU_ALL_TTL, load_from_db)
 
+    def get_category(self, category_id: int) -> dict | None:
+        """Категория с блюдами (из кеша, при промахе из БД)."""
+        def load_from_db():
+            category = self.db.query(Category).filter(Category.id == category_id).first()
+            if not category:
+                return None
+            items = (
+                self.db.query(MenuItem)
+                .filter(MenuItem.category_id == category_id)
+                .order_by(MenuItem.id)
+                .all()
+            )
+            return {
+                "id": category.id,
+                "name": category.name,
+                "items": [item_to_dict(item) for item in items],
+            }
+
+        return self._cache_aside(f"menu:category:{category_id}", MENU_CATEGORY_TTL, load_from_db)
+
     def invalidate_cache(self) -> None:
-        """Сбрасывает кеш меню."""
+        """Сбрасывает кеш меню: всё меню и все категории."""
         redis_client.delete(MENU_ALL_KEY)
+        # Блюдо могло перейти из одной категории в другую,
+        # поэтому проще сбросить кеш всех категорий.
+        for key in redis_client.scan_iter("menu:category:*"):
+            redis_client.delete(key)
 
 
 class InMemoryMenuRepository(MenuRepository):
@@ -146,13 +180,14 @@ class InMemoryMenuRepository(MenuRepository):
                 return item
         return None
 
-    def save_item(self, name: str, price: float, is_available: bool) -> int:
+    def save_item(self, name: str, price: float, is_available: bool, category_id: int | None) -> int:
         item_id = len(memory_db.menu_items) + 1
         memory_db.menu_items[item_id] = memory_db.MenuItemRecord(
             id=item_id,
             name=name,
             price=price,
             is_available=is_available,
+            category_id=category_id,
         )
         return item_id
 
@@ -162,6 +197,13 @@ class InMemoryMenuRepository(MenuRepository):
     def get_all_items(self) -> list[dict]:
         items = sorted(memory_db.menu_items.values(), key=lambda item: item.id)
         return [item_to_dict(item) for item in items]
+
+    def get_category(self, category_id: int) -> dict | None:
+        category = memory_db.categories.get(category_id)
+        if not category:
+            return None
+        items = [item for item in self.get_all_items() if item["category_id"] == category_id]
+        return {"id": category.id, "name": category.name, "items": items}
 
     def invalidate_cache(self) -> None:
         # Кеша у in-memory реализации нет, сбрасывать нечего.

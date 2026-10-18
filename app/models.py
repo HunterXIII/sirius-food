@@ -43,6 +43,14 @@ class RefreshToken(Base):
     is_revoked = Column(Boolean, default=False)
 
 
+class Category(Base):
+    """Категория меню: супы, горячее, напитки и т.д."""
+    __tablename__ = "categories"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50), unique=True, nullable=False)
+
+
 class MenuItem(Base):
     __tablename__ = "menu_items"
 
@@ -50,6 +58,8 @@ class MenuItem(Base):
     name = Column(String, nullable=False)
     price = Column(Float, nullable=False)
     is_available = Column(Boolean, default=True)
+    # Категория необязательна: у блюд, созданных до lab4, её нет.
+    category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
 
 
 class Order(Base):

@@ -31,11 +31,18 @@ class UserRecord:
 
 
 @dataclass
+class CategoryRecord:
+    id: int
+    name: str
+
+
+@dataclass
 class MenuItemRecord:
     id: int
     name: str
     price: float
     is_available: bool
+    category_id: int | None = None
 
 
 @dataclass
@@ -64,10 +71,14 @@ class RefreshTokenRecord:
     is_revoked: bool
 
 
+# Категории меню, как в миграции lab4.
+CATEGORY_NAMES = ["Супы", "Горячее", "Гарниры", "Салаты", "Напитки", "Выпечка"]
+
 # "Таблицы": id -> запись.
 # Общие для всех модулей, чтобы заказ видел пользователей и блюда.
 roles: dict[int, RoleRecord] = {}
 users: dict[int, UserRecord] = {}
+categories: dict[int, CategoryRecord] = {}
 menu_items: dict[int, MenuItemRecord] = {}
 orders: dict[int, OrderRecord] = {}
 deliveries: dict[int, DeliveryRecord] = {}
@@ -86,6 +97,11 @@ def clear():
     roles.clear()
     for role_id, name in enumerate(["student", "cook", "courier", "admin"], start=1):
         roles[role_id] = RoleRecord(id=role_id, name=name)
+
+    # Категории меню - тоже справочник из миграции.
+    categories.clear()
+    for category_id, name in enumerate(CATEGORY_NAMES, start=1):
+        categories[category_id] = CategoryRecord(id=category_id, name=name)
 
 
 # Заполнить роли при старте.

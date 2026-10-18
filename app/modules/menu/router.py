@@ -21,6 +21,16 @@ def get_menu_items(db: Session = Depends(get_db)):
     return service.get_menu()
 
 
+@router.get("/categories/{category_id}")
+def get_menu_category(category_id: int, db: Session = Depends(get_db)):
+    # Категория с блюдами, тоже без токена.
+    service = MenuService(get_menu_repository(db))
+    try:
+        return service.get_category(category_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.post("/items")
 def create_menu_item(
     payload: MenuItemCreate,
@@ -44,9 +54,15 @@ def create_menu_item(
     service = MenuService(get_menu_repository(db))
 
     try:
-        item_id = service.create_item(name=payload.name, price=payload.price)
+        item_id = service.create_item(
+            name=payload.name,
+            price=payload.price,
+            category_id=payload.category_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
     return {"status": "success", "item_id": item_id}
 
@@ -73,6 +89,7 @@ def update_menu_item(
             name=payload.name,
             price=payload.price,
             is_available=payload.is_available,
+            category_id=payload.category_id,
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
