@@ -12,7 +12,7 @@
 - на 9 баллов: rate limiting на Redis, CORS, секреты в `.env`, Swagger выключен в продакшене;
 - на 10 баллов: одно задание на выбор, у меня Refresh Token rotation.
 
-Полный текст задания lab3 - в коммите с тегом `lab3` (`git show lab3:task.md`), в `task.md` сейчас лежит задание lab4. Задание и README lab2 остались в коммите с тегом `lab2` (`git show lab2:README.md`).
+Полный текст задания lab3 - в коммите с тегом `lab3` (`git show lab3:task.md`), в `task.md` сейчас лежит задание lab5. Задание и README lab2 остались в коммите с тегом `lab2` (`git show lab2:README.md`).
 
 ## Что сделано
 

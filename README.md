@@ -1,30 +1,31 @@
-# Лабораторная работа 4. Кеширование меню в Redis (Cache-Aside)
+# Лабораторная работа 5. Фоновые задачи на Celery
 
 ## Задание
 
-В «Сириус.Еде» меню читают сотни раз в минуту, а меняют редко. Без кеша каждый `GET /menu/items` идёт в PostgreSQL. Нужно:
+В «Сириус.Еде» `POST /orders/create` после сохранения заказа генерирует PDF-чек, отправляет email и SMS, и всё это синхронно - клиент ждёт около 4 секунд. Нужно:
 
-- замерить нагрузку Locust'ом до кеша (500 пользователей, +10 в секунду);
-- подключить Redis и сделать Cache-Aside для меню в слое Repository (не в Service);
-- TTL 5 минут и событийная инвалидация при создании и изменении блюда;
-- повторить замер и показать, что нагрузка с БД ушла;
-- на 8 баллов: README с таблицей и графиками «до/после»;
-- на 9 баллов: защита от cache stampede;
-- на 10 баллов: категории меню в кеше с другим TTL или прогрев кеша при старте. Сделал и то, и другое.
+- добавить заглушки PDF/email/SMS через `time.sleep` и замерить время ответа «до»;
+- подключить Celery с Redis в роли брокера, вынести PDF, email и SMS в фоновые задачи;
+- вызывать задачи из слоя Service (не из роутера);
+- повторить замер и показать, что API отвечает мгновенно;
+- на 8 баллов: ретраи с экспоненциальной задержкой, Dead Letter Queue, идемпотентность, README с графиками;
+- на 9 баллов: мониторинг через Flower, скриншоты;
+- на 10 баллов: периодическая задача через Celery Beat. Сделал обновление статистики: раз в минуту число заказов за день пишется в Redis.
 
-Полный текст задания - в [task.md](task.md). Задание и README прошлых работ - в коммитах с тегами: `git show lab3:README.md`, `git show lab2:README.md`.
+Полный текст задания - в [task.md](task.md). README прошлых работ: [README-lab4.md](README-lab4.md), [README-lab3.md](README-lab3.md), lab2 - в коммите с тегом `lab2` (`git show lab2:README.md`).
 
 ## Что сделано
 
-- `GET /menu/items` - публичный эндпоинт со всем меню. Раньше его в проекте не было.
-- `app/core/redis.py` - клиент Redis по методичке.
-- Cache-Aside в `PostgresMenuRepository`: ключ `menu:all`, TTL 300 секунд. Сервис и роутер не знают про Redis.
-- Инвалидация: `MenuService.create_item` и `update_item` после сохранения вызывают `repository.invalidate_cache()`.
-- Защита от cache stampede: при промахе в БД идёт только запрос, взявший блокировку Redis `lock:<ключ>`, остальные ждут и читают кеш.
-- Категории: таблица `categories` (миграция), у блюда `category_id`, эндпоинт `GET /menu/categories/{id}` с кешем `menu:category:{id}` на 600 секунд.
-- Прогрев кеша при старте приложения (`lifespan` в `main.py`).
-- Если Redis недоступен, меню читается прямо из БД (как сказано в шаге 6 методички).
-- Замеры Locust: `loadtest/before` (до кеша), `loadtest/final` (с кешем); графики `loadtest/rps.png`, `loadtest/latency.png`; скрипт проверки stampede `loadtest/stampede_check.py`.
+- `app/core/celery_app.py` - приложение Celery: брокер и backend результатов - Redis, JSON-сериализация, очереди `default` и `dlq`, базовый класс задач `TaskWithDLQ`, расписание Beat.
+- `app/tasks/orders.py` - задачи `generate_order_pdf`, `send_order_email`, `send_order_sms` (заглушки на `time.sleep`).
+- `OrderService.create_order` после сохранения заказа ставит задачи в очередь через `.delay()`. Роутер не менялся.
+- Ретраи: email и SMS при ошибке повторяются до 3 раз с экспоненциальной задержкой. Email падает для каждого заказа с id, кратным 5 (как в методичке).
+- Dead Letter Queue: задача, которая упала после всех ретраев, кладётся в очередь `dlq` и лежит там, пока её не разберут.
+- Идемпотентность: каждая задача после выполнения ставит в Redis флаг (`pdf_generated:<id>`, `email_sent:<id>`, `sms_sent:<id>`) на час. Повторный запуск с тем же заказом ничего не делает.
+- Celery Beat: задача `update_orders_stats` раз в минуту считает заказы за сегодня и пишет число в Redis `stats:orders:<дата>`. Для этого у заказа появилось время создания `created_at` (миграция).
+- Flower: скриншоты в `screenshots/`.
+- Замеры: `loadtest/lab5/before.txt`, `loadtest/lab5/after.txt`, график `loadtest/lab5/orders_time.png` (скрипт `loadtest/lab5/plot.py`).
+- В тестах задачи Celery подменяются заглушками (`unittest.mock.patch`), чтобы тесты не складывали задачи в настоящую очередь.
 
 ## Как запустить
 
@@ -34,290 +35,285 @@ PostgreSQL и Redis:
 docker compose up -d db redis
 ```
 
-Зависимости (в `requirements.txt` добавлен `locust`, `redis` был ещё с lab3):
+Зависимости (в `requirements.txt` добавлены `celery` и `flower`) и миграция с `orders.created_at`:
 
 ```bash
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-Миграция с таблицей категорий:
-
-```bash
 alembic upgrade head
 ```
 
-Сервер (как в lab3, Swagger на http://127.0.0.1:8000/docs при `DEBUG=True`):
+Дальше каждый процесс - в своём терминале (все из корня проекта, с активированным `.venv`).
+
+API (Swagger на http://127.0.0.1:8000/docs при `DEBUG=True`):
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Тесты (нужен Redis, PostgreSQL не нужен):
+Воркер Celery. `-Q default` обязательно: воркер должен слушать только обычную очередь, а не `dlq` (почему - в разделе про DLQ):
+
+```bash
+celery -A app.core.celery_app worker -Q default --loglevel=info
+```
+
+Celery Beat (расписание периодических задач):
+
+```bash
+celery -A app.core.celery_app beat --loglevel=info
+```
+
+Flower, открыть http://localhost:5555:
+
+```bash
+celery -A app.core.celery_app flower
+```
+
+Тесты (нужен Redis, PostgreSQL и воркер не нужны):
 
 ```bash
 python -m unittest discover tests -v
 ```
 
+Токен для запросов: войти студентом через `POST /auth/login` (в Swagger или curl) и взять `access_token`:
+
+```bash
+export TOKEN=<access_token>
+curl -X POST "http://127.0.0.1:8000/orders/create" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"item_id": 1, "quantity": 2}'
+```
+
+Для замеров завёл отдельного студента с телефоном (`POST /users/register`) и пополнил ему баланс (`POST /users/{id}/topup`), чтобы хватило на все тестовые заказы.
+
 ### Как делал замеры
 
-Сервер для замеров запускал без `--reload` и с `DEBUG=False`. При `DEBUG=True` SQLAlchemy печатает в терминал каждый SQL-запрос (`echo=settings.DEBUG` из lab3), и замер «до» мерил бы скорость печати в консоль.
+Сервер для замеров запускал как в lab4: без `--reload` и с `DEBUG=False` (иначе в терминал печатается каждый SQL-запрос):
 
 ```bash
 DEBUG=False uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Locust запускал без веб-интерфейса, с теми же параметрами, что в методичке (500 пользователей, spawn rate 10), 2 минуты. Результаты сохраняются в CSV и HTML-отчёт:
+Один запрос - `time curl ...`, как в методичке. Для графика - 10 запросов подряд, curl печатает время каждого (`%{time_total}`, в секундах):
 
 ```bash
-locust -f locustfile.py --headless -u 500 -r 10 -t 120s --host http://127.0.0.1:8000 --csv loadtest/before/locust --html loadtest/before/report.html
+for i in $(seq 1 10); do curl -s -o /dev/null -w "%{time_total}\n" -X POST "http://127.0.0.1:8000/orders/create" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"item_id": 1, "quantity": 2}'; done > loadtest/lab5/before.txt
 ```
 
-То же самое можно сделать через веб-интерфейс: `locust -f locustfile.py --host=http://127.0.0.1:8000`, открыть http://localhost:8089.
-
-Нагрузку на БД считал по статистике PostgreSQL: сколько раз читали таблицу `menu_items` и сколько было транзакций в базе (до и после теста):
+«До» - на коммите `3e8e82a` (заглушки `time.sleep` прямо в сервисе), «после» - на коммите `5cd7cce` (задачи через Celery, воркер запущен), файл `after.txt`. График:
 
 ```bash
-docker compose exec db psql -U sirius -d sirius_food -c "SELECT seq_scan + idx_scan FROM pg_stat_user_tables WHERE relname = 'menu_items'"
-docker compose exec db psql -U sirius -d sirius_food -c "SELECT xact_commit + xact_rollback FROM pg_stat_database WHERE datname = 'sirius_food'"
+python loadtest/lab5/plot.py
 ```
-
-Load average - `cat /proc/loadavg` сразу после теста.
-
-Графики:
-
-```bash
-pip install matplotlib
-python loadtest/plot.py
-```
-
-Проверка stampede (сервер должен работать):
-
-```bash
-python -m loadtest.stampede_check
-```
-
-Данные для замера. В меню было 3 блюда, это нереально мало для столовой. Перед замером «до» добавил через `POST /menu/items` (под поваром) ещё 47 блюд, всего 50. Позже, когда появились категории, разложил их по 6 категориям через `PATCH /menu/items/{id}`.
 
 ## История коммитов
 
 ```text
-d615df4 Lab3: задание (task.md) и README   (тег lab3)
-cb74a8d Lab4 шаг 1: публичный GET /menu/items (без кеша) и locustfile.py для замера baseline
-83a67fe Lab4 шаги 2-3: клиент Redis (app/core/redis.py), Cache-Aside для меню в PostgresMenuRepository
-        (сюда же попали результаты замера «до» - loadtest/before)
-51c0777 Lab4 шаг 4: событийная инвалидация кеша меню при создании и изменении блюда
-4a39a66 Lab4: защита от cache stampede через блокировку Redis, скрипт проверки loadtest/stampede_check.py; результаты Locust до/после
-d397af7 Lab4: категории меню (таблица categories, миграция), GET /menu/categories/{id} с кешем menu:category:{id} на 10 минут
-fe385a0 Lab4: прогрев кеша меню при старте (lifespan); если Redis недоступен, меню читается из БД
-1233f5f Lab4: итоговый замер Locust и графики до/после (loadtest/plot.py)
-...     Lab4: задание (task.md) и README
+65123ca ...                                                    (lab4, тег lab4)
+3e8e82a Lab5 шаг 1: имитация тяжёлых операций (PDF, email, SMS) в OrderService, замер baseline
+5cd7cce Lab5 шаги 2-6: Celery на Redis, задачи PDF/email/SMS, вызов через .delay() из OrderService, замер после
+f13cfe0 Lab5 шаги 7-9: ретраи, идемпотентность, очереди default и dlq, TaskWithDLQ
+2773d84 Lab5: Celery Beat - статистика заказов за день в Redis (orders.created_at, миграция), flower
+...     Lab5: задание (task.md), README, график, скриншоты Flower
 ```
 
-Замер «до» сделан на коммите `cb74a8d`, замер «с кешем» - на итоговом коде `fe385a0`. Был ещё промежуточный замер после шагов 1-4 (коммит `51c0777`), он лежит в `loadtest/after`, в таблицу не вошёл.
-
-## Структура (что добавилось после lab3)
+## Структура (что добавилось после lab4)
 
 ```text
 app/
 ├── core/
-│   └── redis.py                 # новый: клиент Redis, check_redis_connection
-├── models.py                    # Category, MenuItem.category_id
-├── memory_db.py                 # CategoryRecord, категории заполняются в clear()
-├── schemas.py                   # category_id в MenuItemCreate и MenuItemUpdate
-├── main.py                      # lifespan: прогрев кеша при старте
-└── modules/menu/
-    ├── repository.py            # Cache-Aside, блокировка, invalidate_cache, warm_up_cache
-    ├── service.py               # get_menu, get_category, вызов invalidate_cache
-    └── router.py                # GET /menu/items, GET /menu/categories/{id}
-alembic/versions/7bb4ce2dba0d_add_categories.py
-locustfile.py
-loadtest/
-├── before/  final/  (after/)   # результаты Locust (CSV, HTML-отчёт, вывод), load average, статистика PostgreSQL
-├── rps.png  latency.png         # графики
-├── plot.py                      # рисует графики из CSV
-└── stampede_check.py            # проверка защиты от cache stampede
+│   └── celery_app.py         # новый: Celery, очереди default/dlq, TaskWithDLQ, beat_schedule
+├── tasks/                    # новый: фоновые задачи
+│   ├── __init__.py
+│   ├── orders.py             # generate_order_pdf, send_order_email, send_order_sms
+│   └── stats.py              # update_orders_stats (для Beat)
+├── models.py                 # Order.created_at
+├── memory_db.py              # OrderRecord.created_at
+└── modules/orders/
+    ├── service.py            # .delay() после сохранения заказа, count_orders_by_day
+    ├── repository.py         # count_orders_by_day, created_at при сохранении
+    └── router.py             # без изменений
+alembic/versions/cd69256dbf7b_add_orders_created_at.py
+loadtest/lab5/                # before.txt, after.txt, plot.py, orders_time.png
+screenshots/                  # скриншоты Flower
+tests/                        # задачи Celery подменяются заглушками
 ```
 
-`service.py` по-прежнему не импортирует ни redis, ни sqlalchemy:
+`service.py` не импортирует ни fastapi, ни sqlalchemy, ни celery - только функции задач:
 
 ```bash
-$ grep -n "import" app/modules/menu/service.py
-5:from app.exceptions import NotFoundError
-6:from app.modules.menu.repository import MenuRepository
+$ grep -n "import" app/modules/orders/service.py
+5:from app.exceptions import NotFoundError, AccessDeniedError
+6:from app.modules.orders.repository import OrderRepository
+7:from app.tasks.orders import generate_order_pdf, send_order_email, send_order_sms
 ```
 
-## Как работает кеш
-
-Ключи в Redis:
+## Как это работает
 
 ```text
-menu:all              всё меню, JSON-список блюд, TTL 300 с
-menu:category:{id}    категория с её блюдами, TTL 600 с
-lock:menu:all         блокировка на время чтения из БД (живёт максимум 10 с)
-lock:menu:category:{id}
+клиент --POST /orders/create--> router --> OrderService.create_order
+                                              | проверки, списание баланса,
+                                              | save_order (COMMIT в PostgreSQL)
+                                              | generate_order_pdf.delay(id)  --LPUSH-->  Redis, список "default"
+                                              | send_order_email.delay(id, email)  -->        |
+                                              | send_order_sms.delay(id, phone)    -->        |
+клиент <--{"order_id": 42} (~15 мс)-----------+                                               |
+                                                                                              v
+                                                         воркер Celery (12 процессов) забирает сообщения,
+                                                         три задачи выполняются параллельно (~2 с),
+                                                         результат -> Redis celery-task-meta-<id>
+
+Celery Beat --раз в 60 с--> update_orders_stats в "default" --> воркер --> SELECT count(*) --> Redis stats:orders:<дата>
 ```
 
-Чтение (`GET /menu/items`):
+Ключи в Redis, которые появились в lab5:
 
 ```text
-router -> MenuService.get_menu() -> repository.get_all_items()
-                                          |
-                          redis GET menu:all
-                          /                 \
-                есть (hit)                  нет (miss)
-           json.loads -> ответ        взять lock:menu:all (не ждать)
-                                     /                         \
-                                 взяли                         не взяли
-                     ещё раз GET menu:all            подождать 0.05 с и снова
-                     SELECT из PostgreSQL            GET menu:all (там уже
-                     SETEX menu:all 300 <json>       будут данные от того,
-                     отпустить блокировку            кто взял блокировку)
+default                  очередь задач (список), обычно пустая - воркер сразу забирает
+dlq                      Dead Letter Queue (список), задачи, упавшие после всех ретраев
+pdf_generated:<id>       флаги идемпотентности, TTL 3600 с
+email_sent:<id>
+sms_sent:<id>
+stats:orders:<дата>      число заказов за день (пишет Beat-задача)
+celery-task-meta-<uuid>  результаты задач (backend), Celery хранит их сутки
+_kombu.binding.*         служебные ключи kombu: какая очередь к какому exchange привязана
 ```
 
-Изменение (`POST /menu/items`, `PATCH /menu/items/{id}`): сервис сохраняет блюдо в БД, потом `repository.invalidate_cache()` удаляет `menu:all` и все `menu:category:*`. Следующий GET получит miss и положит в кеш свежие данные.
+### Ретраи
 
-Две инвалидации вместе:
-- событийная - когда меню меняют через наше API, кеш сбрасывается сразу;
-- по TTL - если меню поменяли в обход API (руками в БД, другим сервисом) или Redis потерял команду удаления, старые данные проживут не больше 5 минут.
+```text
+send_order_email(35, ...)  -> Exception -> retry, задержка случайная 0..1 с
+                           -> Exception -> retry, 0..2 с
+                           -> Exception -> retry, 0..4 с
+                           -> Exception -> ретраи кончились (max_retries=3) -> FAILURE
+                                        -> TaskWithDLQ.on_failure -> копия задачи в очередь dlq
+```
+
+Задержка `2^номер_попытки` секунд (1, 2, 4, ... до `retry_backoff_max=600`). Из-за `retry_jitter=True` Celery берёт случайное число от 0 до этой задержки. Поэтому в логе не ровно 1, 2, 4 с, а например 1, 0, 4.
+
+### DLQ
+
+Сама Celery на Redis не умеет «перекладывать» упавшие задачи в другую очередь: в методичке объявлены очереди `default` и `dlq`, но без кода в `dlq` ничего не попадёт. Поэтому у задач базовый класс `TaskWithDLQ`: в `on_failure` (Celery вызывает его только когда задача упала окончательно, на ретраях - нет) он отправляет ту же задачу с теми же аргументами в очередь `dlq`.
+
+Воркер запускается с `-Q default`. Без этого флага он слушал бы все очереди из `task_queues`, в том числе `dlq`, и сразу же снова выполнял бы упавшие задачи.
+
+Посмотреть DLQ: `docker compose exec redis redis-cli -n 0 lrange dlq 0 -1` или вкладка Broker во Flower. В сообщении видно имя задачи (`headers.task`), аргументы (`argsrepr`) и id исходной задачи (`root_id`, по нему её можно найти во Flower вместе с ошибкой).
+
+Разобрать DLQ:
+- исправить причину и выполнить задачи из `dlq` заново - запустить воркер на эту очередь: `celery -A app.core.celery_app worker -Q dlq --loglevel=info`. Если причина не исправлена, задача после ретраев снова вернётся в `dlq` (и такой воркер будет гонять её по кругу, поэтому его запускают только на время разбора);
+- или просто очистить: `celery -A app.core.celery_app purge -Q dlq`.
 
 ## Что сделал не так, как в методичке, и почему
 
-1. В проекте не было `GET /menu/items` (с lab2 были только `POST /menu/items` и `PATCH /menu/items/{id}`). Добавил его, публичным: меню не секрет, и методичка в locustfile сама предлагает сделать эндпоинт публичным для замера.
-2. Репозиторий отдаёт меню списком словарей, а не объектами `MenuItem`. В методичке на miss возвращаются ORM-объекты, а на hit - `MenuItem(**item)` из словарей, то есть два разных вида объектов, и в JSON методички нет `is_available`. У меня и из БД, и из кеша приходит одно и то же: список словарей, собранный одной функцией `item_to_dict`. Роутеру больше ничего и не нужно - он отдаёт JSON.
-3. Имена методов как в lab2: `get_item_by_id`, `save_item`, `update_item`, а не `get_by_id`, `save`. Новый метод назвал `get_all_items` в том же стиле. Ошибки - `ValueError` и `NotFoundError` из lab2, а не `MenuItemNameExistsError`.
-4. С lab2 у меню есть абстрактный `MenuRepository` и две реализации: `PostgresMenuRepository` и `InMemoryMenuRepository` (для тестов и CI). Кеш есть только в PostgreSQL-реализации. У in-memory `invalidate_cache` и `warm_up_cache` ничего не делают: данные и так в памяти.
-5. Меню сортируется по `id` (`order_by`). Без `ORDER BY` PostgreSQL не обещает порядок строк, и меню после каждого обновления кеша могло бы перемешиваться.
-6. `json.dumps(..., ensure_ascii=False)` - чтобы в `redis-cli get menu:all` были видны русские названия, а не `Бо...`.
-7. Проверка `if cached_data is not None`, а не `if cached_data:`. Разница появится, если закешировать пустую строку. С JSON (`"[]"`) работает одинаково, но так точнее читается «ключ есть / ключа нет».
-8. Защита от stampede сделана не через `with redis_client.lock(...)` (там все ждущие запросы по очереди берут блокировку), а так: блокировку пытаемся взять без ожидания (`blocking=False`); кто не взял - спит 50 мс и снова смотрит в кеш. Так ждущие получают данные из кеша сразу, как только он заполнен, и не выстраиваются в очередь за блокировкой. После взятия блокировки кеш проверяется ещё раз: пока мы её брали, его мог заполнить другой запрос.
-9. Категорий в проекте не было совсем (в методичке упоминается «JOIN категорий», но в модели lab2 их нет). Сделал таблицу `categories` и миграцию, которая заполняет 6 категорий (как роли в lab3), у блюда - необязательный `category_id` (у старых блюд категории нет). Категорию можно передать при создании и изменении блюда; несуществующая категория - 404.
-10. `None` (категории нет) не кладётся в кеш. Иначе после появления категории с таким id эндпоинт ещё 10 минут отвечал бы 404.
-11. `invalidate_cache` удаляет не только `menu:all`, но и все `menu:category:*`: блюдо могло перейти из одной категории в другую, и устареют обе. Ключи ищу через `SCAN` (`scan_iter`), а не `KEYS`: `KEYS` обходит всю базу Redis за одну команду и блокирует его на это время.
-12. Прогрев сделан через `lifespan`, а не через `@app.on_event("startup")`: в нашей версии FastAPI (0.110) `on_event` помечен устаревшим (`DeprecationWarning`), `lifespan` - его официальная замена. Работает так же: код до `yield` выполняется при старте. При прогреве кеш сначала сбрасывается: в Redis мог остаться `menu:all` от прошлого запуска, а меню за это время могли поменять в БД.
-13. Если Redis недоступен, `_cache_aside` ловит `redis.ConnectionError` и читает меню прямо из БД, а `invalidate_cache` просто пропускает удаление. В методичке (шаг 6) сказано, что без Redis приложение должно продолжать работать, но в коде методички на это ничего нет: проверял, без Redis `GET /menu/items` отдавал 500. Прогрев при недоступном Redis пропускается (`check_redis_connection` из методички), и приложение всё равно стартует.
-14. Ожидаемый результат методички после кеша «2–5 мс, RPS в десятки раз» у меня не получился - объяснение в разделе с замерами.
+1. `create_order` в проекте с lab2 принимает `user_id` и возвращает id заказа, а не объект `Order`. У заказа нет связи `customer`, поэтому email и телефон беру у `user`, которого сервис и так загружает в начале для проверки баланса: `send_order_email.delay(order_id, user.email)`.
+2. SMS отправляется, только если у пользователя есть телефон: при регистрации он необязательный (`phone: str | None`). Иначе задача «отправляла» бы SMS на `None`.
+3. В `Celery(...)` добавлен `include=["app.tasks.orders", "app.tasks.stats"]`. Воркер запускается с `-A app.core.celery_app` и импортирует только этот файл; без `include` он не знает о задачах из `app/tasks/` и на каждое сообщение пишет «Received unregistered task».
+4. DLQ: в методичке только объявлены очереди, и задачи туда не попадают. Сделал `TaskWithDLQ.on_failure` и запуск воркера с `-Q default` (выше).
+5. Ретраи сделал не только у email, но и у SMS: это тоже внешний сервис. У PDF ретраев нет - это наша внутренняя операция, но `TaskWithDLQ` есть у всех трёх задач: если генерация PDF упадёт, задача тоже не потеряется.
+6. Идемпотентность не только у PDF (шаг 8), но и у email и SMS - в целях работы сказано про дубли «чеков или писем». Флаг ставится только после успешной отправки, поэтому упавший email ретраится, а уже отправленный повторно не уходит.
+7. В методичке написано «задержка 1с, 2с, 4с», но в её же коде `retry_jitter=True`, а с ним задержка случайная (от 0 до 1, 2, 4 с). Оставил код методички, в логе это видно: `Retry in 1s`, `Retry in 0s`, `Retry in 4s`.
+8. «Сообщения о превышении max_retries» в логе нет: при `autoretry_for` после последней попытки Celery пробрасывает исходное исключение, а не `MaxRetriesExceededError`. В логе - `raised unexpected: Exception('Email service unavailable')`, во Flower у задачи `Retries: 3` и статус `FAILURE`.
+9. `pdf_generated:<id>` и остальные ключи лежат в Redis базы 0 - там же, где очередь и кеш из lab4 (у нас один `REDIS_URL`).
+10. Для Beat выбрал статистику: таблицы `task_logs` в проекте нет. У заказов не было времени создания, добавил `created_at` миграцией. У заказов, созданных до миграции, оно `NULL` (когда они созданы, уже не узнать), в статистику они не попадают. Время ставит SQLAlchemy (`default=datetime.now`), то есть в часовом поясе приложения, и задача считает «сегодня» через `date.today()` в том же поясе. Если бы время ставил PostgreSQL (`now()`), в Docker он в UTC, и около полуночи день не совпадал бы.
+11. Задача Beat - точка входа, как роутер: сама открывает сессию БД и вызывает `OrderService.count_orders_by_day`, а SQL-запрос - в репозитории. Число кладётся в Redis (задание это разрешает), отдельную таблицу не делал.
+12. Замер - не один `time curl`, а 10 запросов подряд (для графика). Один `time curl` тоже есть в примере вывода.
+13. Начисление бонусов из теории (п. 2.1) не делал: бонусов в проекте нет, и в шагах их нет.
+14. Тесты: в `setUp` задачи Celery подменяются `unittest.mock.patch`, иначе каждый тест с заказом клал бы задачи в настоящую очередь Redis, и запущенный воркер их выполнял бы.
 
 ## Разбор кода
 
-### app/core/redis.py
+### app/core/celery_app.py
 
-Как в методичке. `redis.from_url(settings.REDIS_URL, decode_responses=True)` - клиент, который возвращает строки (а не `bytes`), их сразу можно отдать в `json.loads`. Подключение ленивое: соединение открывается при первой команде. `check_redis_connection()` делает `PING` и возвращает `False` вместо исключения, если Redis не отвечает. В `app/core/rate_limit.py` из lab3 остался свой клиент - его не трогал.
+- `Celery("sirius_food", broker=..., backend=..., include=[...])` - приложение. Broker - куда кладутся задачи (Redis, списки). Backend - куда воркер пишет результат и статус задачи (`celery-task-meta-<id>`). `include` - модули с задачами для воркера.
+- `conf.update(task_serializer="json", accept_content=["json"], ...)` - задачи и результаты в JSON. Pickle опасен: при чтении он может выполнить код, а сообщения лежат в Redis, куда может записать кто-то посторонний. Из-за JSON в задачу передаются простые значения (`order_id`, email), а не объекты ORM.
+- `task_queues` и `task_default_*` - две очереди (`default` и `dlq`), по умолчанию всё идёт в `default`.
+- `beat_schedule` - расписание: задача `app.tasks.stats.update_orders_stats` каждые 60 секунд.
+- `TaskWithDLQ(Task)` - базовый класс задачи. `on_failure` вызывается, когда задача упала окончательно; он вызывает `self.apply_async(args=args, kwargs=kwargs, queue="dlq")` - ставит ту же задачу в очередь `dlq` - и пишет в лог.
 
-### app/modules/menu/repository.py
+### app/tasks/orders.py
 
-Константы: `MENU_ALL_KEY = "menu:all"`, `MENU_ALL_TTL = 300`, `MENU_CATEGORY_TTL = 600`.
+- `@celery_app.task` превращает функцию в задачу: у неё появляются `.delay()` / `.apply_async()`, а имя задачи - `app.tasks.orders.<функция>`.
+- `generate_order_pdf(self, order_id)` - `bind=True` из методички: первым аргументом приходит сама задача (`self`), через неё доступны `self.request.id`, `self.request.retries`, `self.retry()`. Здесь он не используется, оставил как в методичке.
+- Идемпотентность во всех трёх задачах одинаковая: ключ `<что>:<order_id>`; если `redis_client.exists(key)` - вернуть «already ...» без работы; иначе работа (`time.sleep`) и `setex(key, 3600, "1")` - флаг на час.
+- `send_order_email` и `send_order_sms` - параметры ретраев: `autoretry_for=(Exception,)` - повторять при любом исключении, `retry_backoff=True` - экспоненциальная задержка, `retry_backoff_max=600` - не больше 10 минут, `retry_jitter=True` - случайная задержка, `max_retries=3` - не больше 3 повторов (всего 4 попытки).
+- `if order_id % 5 == 0: raise Exception(...)` - имитация недоступного почтового сервиса из методички. Исключение - до `setex`, то есть письмо «не ушло».
 
-- `item_to_dict(item)` - блюдо (ORM-объект или запись `memory_db`) в словарь: `id`, `name`, `price`, `is_available`, `category_id`. Такой словарь и кладётся в кеш, и отдаётся клиенту.
-- `MenuRepository` - абстрактный интерфейс. Новые методы: `get_all_items`, `get_category`, `invalidate_cache`, `warm_up_cache`.
-- `PostgresMenuRepository._cache_aside(key, ttl, load_from_db)` - вся логика кеша в одном месте, её используют и меню, и категории. `load_from_db` - функция, которая читает данные из БД; её передают, потому что запрос для меню и для категории разный. Внутри:
-  1. `GET key` - есть данные: `json.loads` и вернуть (hit);
-  2. нет данных (miss): `redis_client.lock(f"lock:{key}", timeout=10).acquire(blocking=False)`. Блокировка в Redis - это ключ `lock:menu:all`, который ставится командой `SET ... NX PX 10000` (только если ключа нет). Поэтому взять её может только один запрос, даже если приложение запущено в нескольких процессах. `timeout=10` - если процесс упадёт с блокировкой, через 10 секунд ключ удалится сам;
-  3. взяли блокировку: ещё раз `GET key`, если пусто - `load_from_db()`, `SETEX key ttl json`, вернуть данные; блокировка отпускается в `finally`;
-  4. не взяли: `time.sleep(0.05)` и на начало цикла;
-  5. `except redis.ConnectionError` вокруг всего - Redis лежит, просто читаем из БД.
-- `get_all_items()` - `load_from_db` делает `SELECT * FROM menu_items ORDER BY id`, кешируется в `menu:all` на 300 с.
-- `get_category(category_id)` - категория и её блюда, ключ `menu:category:{id}`, 600 с. Нет категории - `None`, в кеш не кладётся.
-- `invalidate_cache()` - `DEL menu:all` и `DEL` каждого ключа `menu:category:*`.
-- `warm_up_cache()` - `invalidate_cache()` и `get_all_items()`: сбросить старое и положить в кеш свежее меню.
-- `InMemoryMenuRepository` - те же методы над `memory_db`, без кеша.
+### app/tasks/stats.py
 
-Почему кеш именно здесь, а не в сервисе: см. контрольный вопрос 1.
+`update_orders_stats` - берёт `date.today()`, открывает `SessionLocal()`, собирает `OrderService(get_order_repository(db))`, вызывает `count_orders_by_day`, закрывает сессию в `finally` и пишет `SET stats:orders:<дата> <число>`. Каждую минуту число пересчитывается заново, поэтому ничего не накапливается и не сбивается, если Beat пропустил запуск.
 
-### app/modules/menu/service.py
+### app/modules/orders/service.py
 
-- `get_menu()` - просто `repository.get_all_items()`. Бизнес-правил у чтения меню нет.
-- `get_category(id)` - `NotFoundError`, если репозиторий вернул `None`.
-- `create_item` и `update_item` - как в lab2, плюс проверка категории (если передана) и `self.repository.invalidate_cache()` после сохранения. Сервис не знает, что такое Redis: для него это «сообщить хранилищу, что меню изменилось». У in-memory репозитория этот вызов ничего не делает.
+После `save_order` (заказ уже закоммичен в БД) три вызова `.delay()`. `.delay(args)` - короткая запись `.apply_async(args)`: задача сериализуется в JSON и кладётся в Redis, функция сразу возвращает `AsyncResult` (id задачи), не дожидаясь выполнения. Сервис его не использует - клиенту нужен только id заказа. Если вызвать `generate_order_pdf(order_id)` без `.delay`, она выполнится прямо здесь, синхронно, и снова будет 4 секунды.
 
-### app/modules/menu/router.py
+Новый метод `count_orders_by_day(day)` просто спрашивает репозиторий - бизнес-правил в подсчёте нет, но так задача Beat работает через те же слои, что и роутеры.
 
-- `GET /menu/items` - без `require_role`, собирает `MenuService(get_menu_repository(db))` и возвращает `get_menu()`.
-- `GET /menu/categories/{category_id}` - то же, `NotFoundError` -> 404.
-- `POST` и `PATCH` - как в lab3 (только `admin` и `cook`), передают `category_id`; у `POST` добавлен перехват `NotFoundError` -> 404 для неверной категории.
+### app/modules/orders/repository.py, models.py, memory_db.py, миграция
 
-`get_db` создаёт сессию SQLAlchemy на каждый запрос, но соединение с PostgreSQL берётся из пула только при первом SQL. Поэтому при попадании в кеш база не трогается вообще.
+- `Order.created_at = Column(DateTime, default=datetime.now, nullable=True)` - SQLAlchemy подставляет текущее время при INSERT.
+- Миграция `cd69256dbf7b` добавляет колонку `orders.created_at` (nullable). `alembic check` после неё: «No new upgrade operations detected».
+- `PostgresOrderRepository.count_orders_by_day` - `SELECT count(*) ... WHERE date(created_at) = :day`.
+- `InMemoryOrderRepository` тоже реализует метод (иначе абстрактный класс не даст создать объект), а при сохранении ставит `created_at=datetime.now()`.
 
-### app/main.py
+### tests/
 
-`warm_up_menu_cache()`: если Redis не отвечает - печатает сообщение и выходит. Иначе открывает сессию `SessionLocal()`, берёт репозиторий через `get_menu_repository` (в memory-режиме это in-memory, прогревать нечего) и вызывает `warm_up_cache()`. `lifespan` вызывает её до `yield`, то есть до того, как сервер начнёт принимать запросы.
+В `setUp` у `OrderServiceTest` и `SecurityTest` три задачи в модуле `service` подменяются `MagicMock` через `patch(...)`, `addCleanup` возвращает их обратно после теста. Тесты проверяют сервис и HTTP-слой, а не Celery.
 
-### Модель и миграция
+### loadtest/lab5/plot.py
 
-`Category(id, name)`, `MenuItem.category_id` - внешний ключ на `categories.id`, `nullable=True`. Миграция `7bb4ce2dba0d_add_categories` создаёт таблицу, вставляет «Супы, Горячее, Гарниры, Салаты, Напитки, Выпечка» и добавляет колонку с внешним ключом. `downgrade` убирает всё обратно (проверял `alembic downgrade -1` и снова `upgrade head`). `alembic check` после миграции: «No new upgrade operations detected». В `memory_db` те же 6 категорий заполняются в `clear()`.
-
-### locustfile.py
-
-Как в методичке: виртуальный пользователь ждёт 0.1–0.5 с и делает `GET /menu/items`. Токен не нужен - эндпоинт публичный.
-
-### loadtest/stampede_check.py
-
-Наш запрос к меню выполняется за 3-4 мс. За это время одновременные промахи почти не пересекаются, и без подготовки stampede не увидеть (проверял: 200 запросов разом - 1 чтение из БД даже без защиты). Поэтому скрипт имитирует «тяжёлую БД под нагрузкой»:
-
-1. заранее открывает 200 HTTP-соединений;
-2. запоминает, сколько раз читали `menu_items` (`pg_stat_user_tables`);
-3. в отдельной транзакции делает `LOCK TABLE menu_items IN ACCESS EXCLUSIVE MODE` - теперь любой `SELECT` из этой таблицы ждёт;
-4. удаляет `menu:all` (как будто истёк TTL) и через `threading.Barrier` отправляет 200 запросов одновременно;
-5. через 2 секунды снимает блокировку таблицы (`rollback`), ждёт ответов;
-6. снова смотрит счётчик. Статистику PostgreSQL обновляет с задержкой (до 10 секунд), поэтому перед каждым чтением счётчика `sleep(11)`.
-
-### loadtest/plot.py
-
-Читает `locust_stats_history.csv` замеров «до кеша» и «с кешем» (строки `Aggregated`, по одной в секунду) и рисует RPS и время ответа (медиана и 95%) от времени.
+Читает `before.txt` и `after.txt` (секунды, по строке на запрос), рисует среднее (столбцы) и каждый запрос (линии, логарифмическая шкала - иначе 15 мс рядом с 4000 мс не видно).
 
 ## Что происходит при запуске
 
-1. `uvicorn` импортирует `app.main`: читаются настройки, создаются `engine` и клиенты Redis (подключений ещё нет).
-2. Перед приёмом запросов выполняется `lifespan` -> `warm_up_menu_cache()`: `PING` в Redis, удаление `menu:all` и `menu:category:*`, один `SELECT` из `menu_items`, `SETEX menu:all 300`.
-3. Первый `GET /menu/items`: `GET menu:all` в Redis - hit, ответ без похода в БД.
-4. Повар делает `PATCH /menu/items/45`: блюдо сохраняется в БД, `menu:all` и категории удаляются из Redis.
-5. Следующий `GET /menu/items`: miss -> блокировка -> `SELECT` -> `SETEX` -> ответ уже с новой ценой. Остальные запросы снова читают из кеша.
-6. Через 5 минут без изменений `menu:all` удаляется сам (TTL), следующий запрос снова сходит в БД.
+1. `uvicorn` импортирует `app.main` -> роутер заказов -> `service.py` -> `app.tasks.orders` -> `app.core.celery_app`. Создаётся объект Celery, но к Redis он ещё не подключается.
+2. Воркер (`celery ... worker -Q default`) импортирует `celery_app` и модули из `include`, печатает список задач, подключается к Redis и ждёт сообщений в списке `default`. Запускает 12 процессов (`prefork`, по числу ядер).
+3. Beat раз в минуту кладёт в `default` сообщение для `update_orders_stats`. Flower подключается к Redis и включает воркеру отправку событий (в логе воркера: `Events of group {task} enabled by remote`).
+4. Клиент шлёт `POST /orders/create`. Роутер проверяет токен и роль (lab3), сервис проверяет блюдо и баланс, списывает деньги, сохраняет заказ (COMMIT).
+5. Три `.delay()` кладут три сообщения в Redis. Первый вызов после старта ещё и подключается к брокеру (поэтому первый запрос ~240 мс), дальше это доли миллисекунды.
+6. Клиент получает `{"status":"success","order_id":...}` примерно через 15 мс.
+7. Воркер раздаёт три задачи по процессам, они идут параллельно: SMS и email - 1 с, PDF - 2 с. Каждая проверяет флаг в Redis, «работает», ставит флаг. Результат - в `celery-task-meta-<id>`.
+8. Если id заказа кратен 5, email падает, ретраится 3 раза и попадает в `dlq`.
 
 ## Результаты замеров
 
-Условия: всё на одном ноутбуке (12 ядер): uvicorn с одним процессом, PostgreSQL и Redis в Docker, Locust. 500 пользователей, +10 в секунду, 2 минуты, в меню 50 блюд. Цифры - итоговая сводка Locust за весь тест (вместе с разгоном первые 50 секунд), полностью - в `loadtest/*/locust_output.txt`.
+Всё на одном ноутбуке, один процесс uvicorn, `DEBUG=False`, 10 последовательных запросов `{"item_id": 1, "quantity": 2}`.
 
-| | До кеша | С кешем |
+| | До (синхронно) | После (Celery) |
 |---|---|---|
-| Запросов за 2 минуты | 80 666 | 115 518 |
-| RPS (среднее за тест) | 676 | 968 |
-| RPS когда все 500 запущены (по графику) | ~740 | ~1120 |
-| Среднее время ответа | 286 мс | 109 мс |
-| Медиана | 350 мс | 130 мс |
-| 95-й перцентиль | 440 мс | 180 мс |
-| 99-й перцентиль | 490 мс | 200 мс |
-| Ошибки | 0 | 0 |
-| Чтений `menu_items` в PostgreSQL за тест | 80 834 | 1 |
-| Транзакций в БД за тест | 85 738 | 9 |
-| Load average (1 мин) после теста | 4.22 | 2.90 |
+| Среднее время ответа | 4020 мс | 14.7 мс |
+| Минимум | 4011 мс | 12.7 мс |
+| Максимум | 4036 мс | 17.0 мс |
+| `time curl` (один запрос) | 4.026 с | 0.029 с |
 
-«До кеша» - коммит `cb74a8d` (только `GET /menu/items`), «С кешем» - итоговый код со всеми доп. заданиями (коммит `fe385a0`).
+Быстрее примерно в 270 раз. До Celery время ответа - это 4 секунды `sleep` плюс ~15 мс работы самого эндпоинта (токен, проверки, два COMMIT). После - только эти ~15 мс: `.delay()` - это одна команда `LPUSH` в Redis.
 
-Один запрос без нагрузки (среднее по 20 промахам и 200 попаданиям): из БД 3.6 мс, из Redis 1.0 мс.
+![Время ответа POST /orders/create](loadtest/lab5/orders_time.png)
 
-![RPS](loadtest/rps.png)
+В методичке ожидается 50–100 мс, у нас меньше: БД и Redis на той же машине, нагрузки нет. Самый первый запрос после старта сервера был 243 мс - при первом `.delay()` открывается соединение с брокером.
 
-![Время ответа](loadtest/latency.png)
+Ещё одна разница, которой нет в таблице: в фоне три задачи заказа выполняются параллельно в разных процессах воркера, поэтому чек и уведомления готовы через ~2 с после заказа (самая долгая задача - PDF), а не через 4 с.
 
-Что видно:
+## Flower
 
-- Главное: до кеша на каждый запрос был поход в PostgreSQL (80 834 чтения таблицы на 80 666 запросов), с кешем - 1 за 2 минуты. Это и есть «кеш снял нагрузку с СУБД».
-- RPS вырос примерно в 1.5 раза, время ответа упало примерно в 2.5 раза.
-- До кеша с ростом числа пользователей время ответа растёт до 350-440 мс: запросы ждут свободное соединение из пула SQLAlchemy (5 + 10 соединений на 40 потоков FastAPI) и сам PostgreSQL.
+Дашборд в момент, когда воркер выполняет задачи (только что создано 4 заказа, `Active tasks: 8`):
 
-Почему не «2–5 мс и RPS в десятки раз», как в методичке. Теперь упираемся не в БД, а в сам процесс uvicorn. Он один и выполняет Python-код (FastAPI, JSON) на одном ядре. Во время теста с кешем `top` показывал:
+![Flower: воркеры](screenshots/flower_dashboard_live.png)
 
-```text
-    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
-  60098 hunter    20   0 1572772 108460  34296 S 104,9   0,7   2:04.52 uvicorn
-  63314 hunter    25   5  793776  78056  22556 S  47,7   0,5   0:08.26 locust
-  59102 999       20   0  138284  15872   7988 S   9,5   0,1   0:03.52 redis-s+
-```
+Список задач в тот же момент - задачи в состоянии `STARTED`, ниже выполненная задача Beat и упавший email:
 
-PostgreSQL в списке нет совсем. 500 пользователей с паузой 0.1–0.5 с хотят примерно 1600 запросов в секунду, а один процесс отдаёт около 1100-1200. Остальные ждут в очереди - отсюда ~110 мс. Без очереди (один запрос) ответ из кеша - 1 мс. Дальше RPS поднимается запуском нескольких процессов (`uvicorn --workers 4`) или нескольких реплик за балансировщиком. Кеш в Redis для этого подходит: он общий для всех процессов, а блокировка stampede тоже работает между процессами. К тому же у нас запрос к БД лёгкий (50 строк, без JOIN, база на той же машине); на «тяжёлом» запросе разница была бы больше.
+![Flower: задачи в процессе](screenshots/flower_tasks_live.png)
 
-Load average здесь мало что показывает: Locust работает на той же машине и сам грузит процессор, а ядер 12. Но по нему тоже видно, что без кеша нагрузка выше (4.22 против 2.90).
+Список задач после выполнения: `SUCCESS` у PDF/SMS/email, `FAILURE` у email заказа 35, задача Beat `update_orders_stats`:
+
+![Flower: задачи](screenshots/flower_tasks.png)
+
+Карточка упавшей задачи: аргументы `(35, 'celery@sirius.ru')`, `Retries: 3`, исключение `Email service unavailable`:
+
+![Flower: упавшая задача](screenshots/flower_task_failed.png)
+
+Вкладка Broker: очередь `default` пустая (воркер всё забрал), в `dlq` - 2 задачи (email заказов 30 и 35):
+
+![Flower: очереди](screenshots/flower_broker.png)
+
+Время во Flower - в UTC (`timezone="UTC"` в настройках Celery), в логах воркера - местное (MSK, +3 часа).
 
 ## Пример вывода
 
@@ -327,188 +323,250 @@ Load average здесь мало что показывает: Locust работ�
 $ python -m unittest discover tests
 .............................................
 ----------------------------------------------------------------------
-Ran 45 tests in 6.267s
+Ran 45 tests in 6.060s
 
 OK
 ```
 
-### Шаг 2: проверка Redis
+### Шаг 1: замер до Celery
 
 ```text
-$ python -c "from app.core.redis import redis_client; print(redis_client.ping())"
-True
+$ time curl -X POST "http://127.0.0.1:8000/orders/create" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"item_id": 1, "quantity": 2}'
+{"status":"success","order_id":8}
+... 0,01s user 0,00s system 0% cpu 4,026 total
 ```
 
-### Шаг 4: проверка кеша и инвалидации (запросы скриптом, токен повара)
+### Шаг 5: запуск воркера
 
 ```text
-redis exists menu:all -> 0
-GET /menu/items -> блюд: 50 200
-redis exists menu:all -> 1 | ttl -> 300
-redis get menu:all -> [{"id": 1, "name": "Борщ", "price": 100.0, "is_available": true}, {"id": 2, "name": "яблоко", "price": 10.0, "is_availab ...
-POST /menu/items {"name": "Суп дня", "price": 150} -> 200 {"status":"success","item_id":51}
-redis exists menu:all -> 0
-GET /menu/items -> блюд: 51 последнее: {'id': 51, 'name': 'Суп дня', 'price': 150.0, 'is_available': True}
-PATCH /menu/items/51 {"price": 170} -> 200 {"status":"success","item_id":51}
-redis exists menu:all -> 0
-GET /menu/items -> последнее: {'id': 51, 'name': 'Суп дня', 'price': 170.0, 'is_available': True}
+$ celery -A app.core.celery_app worker -Q default --loglevel=info
+ -------------- celery@hunter v5.6.3 (recovery)
+- ** ---------- .> app:         sirius_food:0x7f0fc7954830
+- ** ---------- .> transport:   redis://localhost:6379//
+- ** ---------- .> results:     redis://localhost:6379/
+- *** --- * --- .> concurrency: 12 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+ -------------- [queues]
+                .> default          exchange=default(direct) key=default
+
+[tasks]
+  . app.tasks.orders.generate_order_pdf
+  . app.tasks.orders.send_order_email
+  . app.tasks.orders.send_order_sms
+  . app.tasks.stats.update_orders_stats
+
+[2026-10-19 16:04:24,398: INFO/MainProcess] Connected to redis://localhost:6379//
+[2026-10-19 16:04:25,405: INFO/MainProcess] mingle: all alone
 ```
 
-Новое блюдо и новая цена видны сразу, хотя TTL ещё не истёк. (Блюдо 51 потом удалил из БД, чтобы замеры до и после шли на одинаковом меню.)
-
-### Cache stampede
-
-Без защиты (коммит `51c0777`, только шаги 1-4):
+### Шаг 6: замер после и лог воркера
 
 ```text
-$ python -m loadtest.stampede_check
-Запросов: 200, ответов 200: 200
-Чтений menu_items в PostgreSQL: 40
+$ time curl -s -X POST "http://127.0.0.1:8000/orders/create" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"item_id": 1, "quantity": 2}'
+{"status":"success","order_id":42}
+... 0,00s user 0,01s system 31% cpu 0,029 total
 ```
 
-40 - это сколько запросов FastAPI выполняет одновременно (у синхронных эндпоинтов пул из 40 потоков). Все 40 увидели пустой кеш и пошли в БД за одними и теми же данными. Остальные 160 пришли, когда кеш уже заполнили.
-
-С блокировкой:
+Лог воркера на заказ (заказ 19, шаг 6):
 
 ```text
-$ python -m loadtest.stampede_check
-Запросов: 200, ответов 200: 200
-Чтений menu_items в PostgreSQL: 1
+[15:56:45,435: INFO/MainProcess] Task app.tasks.orders.generate_order_pdf[9acc7975-...] received
+[15:56:45,437: INFO/MainProcess] Task app.tasks.orders.send_order_email[a8dd724b-...] received
+[15:56:45,438: INFO/MainProcess] Task app.tasks.orders.send_order_sms[104ce72c-...] received
+[15:56:46,443: INFO/ForkPoolWorker-8] Task app.tasks.orders.send_order_email[a8dd724b-...] succeeded in 1.005s: 'Email sent to celery@sirius.ru for order 19'
+[15:56:46,443: INFO/ForkPoolWorker-1] Task app.tasks.orders.send_order_sms[104ce72c-...] succeeded in 1.004s: 'SMS sent to +79001234567 for order 19'
+[15:56:47,441: INFO/ForkPoolWorker-7] Task app.tasks.orders.generate_order_pdf[9acc7975-...] succeeded in 2.005s: 'PDF generated for order 19'
 ```
 
-### Категории
+Три разных процесса (`ForkPoolWorker-8`, `-1`, `-7`), всё готово через 2 секунды.
+
+### Шаги 7 и 9: ретраи и DLQ (заказ 35)
 
 ```text
-redis keys menu:* ->
-GET /menu/categories/5 -> 200 {"id":5,"name":"Напитки","items":[{"id":39,"name":"Чай","price":205.0,"is_available":true,"category_id":5},{"id":40,"name":"Кофе",...
-GET /menu/categories/1 -> 200 {"id":1,"name":"Супы","items":[{"id":1,"name":"Борщ","price":100.0,"is_available":true,"category_id":1},...
-GET /menu/items -> 200 [{"id":1,"name":"Борщ","price":100.0,"is_available":true,"category_id":1},...
-redis keys menu:* -> menu:category:1 menu:all menu:category:5
-ttl menu:all -> 300 | ttl menu:category:5 -> 600
-GET /menu/categories/99 -> 404 {"detail":"Категория не найдена"}
-redis keys menu:category:99 ->
-POST /menu/items {"name": "Лимонад", "price": 60, "category_id": 99} -> 404 {"detail":"Категория не найдена"}
-PATCH /menu/items/45 {"price": 75} -> 200 {"status":"success","item_id":45}
-redis keys menu:* ->
-GET /menu/categories/5 -> 200 {"id":5,"name":"Напитки","items":[...
+[16:02:38,056: INFO/MainProcess] Task app.tasks.orders.send_order_email[a08a67c3-...] received
+[16:02:39,065: INFO/ForkPoolWorker-4] Task app.tasks.orders.send_order_sms[ab417d7e-...] succeeded in 1.005s: 'SMS sent to +79001234567 for order 35'
+[16:02:39,082: INFO/ForkPoolWorker-11] Task app.tasks.orders.send_order_email[a08a67c3-...] retry: Retry in 1s: Exception('Email service unavailable')
+[16:02:40,063: INFO/ForkPoolWorker-3] Task app.tasks.orders.generate_order_pdf[dc7054a0-...] succeeded in 2.005s: 'PDF generated for order 35'
+[16:02:41,077: INFO/ForkPoolWorker-7] Task app.tasks.orders.send_order_email[a08a67c3-...] retry: Retry in 0s: Exception('Email service unavailable')
+[16:02:42,088: INFO/ForkPoolWorker-8] Task app.tasks.orders.send_order_email[a08a67c3-...] retry: Retry in 4s: Exception('Email service unavailable')
+[16:02:47,084: ERROR/ForkPoolWorker-7] Задача app.tasks.orders.send_order_email[a08a67c3-...] отправлена в DLQ: Exception('Email service unavailable')
+[16:02:47,084: ERROR/ForkPoolWorker-7] Task app.tasks.orders.send_order_email[a08a67c3-...] raised unexpected: Exception('Email service unavailable')
+Traceback (most recent call last):
+  ...
+  File ".../app/tasks/orders.py", line 53, in send_order_email
+    raise Exception("Email service unavailable")
+Exception: Email service unavailable
 ```
 
-Разные TTL видны: 300 у меню и 600 у категории. После изменения блюда сброшены все ключи меню.
+Id задачи на всех попытках один и тот же: ретрай - это та же задача, поставленная в очередь заново с задержкой. PDF и SMS заказа 35 выполнились нормально - падение email на них не влияет. Для заказа 30 задержки были 1 с, 2 с, 0 с.
 
-### Прогрев кеша
-
-Перед запуском положил в Redis «старые» данные: `SET menu:all '[{"id":1,"name":"stale"}]'` и `SET menu:category:1 old`. Запуск сервера и Redis сразу после него:
+Содержимое DLQ (сообщение для заказа 30, сокращено):
 
 ```text
-INFO:     Started server process [57072]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-
-$ redis-cli keys 'menu:*'
-menu:all
-$ redis-cli get menu:all
-[{"id": 1, "name": "Борщ", "price": 100.0, "is_available": true, "category_id": 1}, {"id": 2, "name": "яблоко", ...
+$ docker compose exec redis redis-cli -n 0 lrange dlq 0 -1
+{"body": "W1szMCwgImNlbGVyeUBzaXJpdXMucnUiXSwge30s...", "content-type": "application/json",
+ "headers": {"lang": "py", "task": "app.tasks.orders.send_order_email", "id": "24eb3e5d-...", "retries": 0,
+ "root_id": "51cc12b6-...", "parent_id": "51cc12b6-...", "argsrepr": "[30, 'celery@sirius.ru']", ...},
+ "properties": {..., "delivery_info": {"exchange": "", "routing_key": "dlq"}, ...}}
 ```
 
-Старые ключи удалены, `menu:all` заполнен свежими данными до первого запроса.
+### Шаг 8: идемпотентность
+
+Задачи вызвал вручную ещё раз для уже обработанного заказа 30, и дважды для нового «заказа» 1000:
+
+```text
+$ python -c "
+from app.tasks.orders import generate_order_pdf, send_order_sms
+print(generate_order_pdf.delay(30).get(timeout=10))
+print(send_order_sms.delay(30, '+79001234567').get(timeout=10))
+print(generate_order_pdf.delay(1000).get(timeout=10))
+print(generate_order_pdf.delay(1000).get(timeout=10))
+"
+PDF already generated for order 30
+SMS already sent for order 30
+PDF generated for order 1000
+PDF already generated for order 1000
+```
+
+Лог воркера: повторы выполнились за ~1 мс вместо 2 с - работы не было:
+
+```text
+[15:59:33,361: INFO/ForkPoolWorker-7] Task app.tasks.orders.generate_order_pdf[e5f0c90a-...] succeeded in 0.0011s: 'PDF already generated for order 30'
+[15:59:33,364: INFO/ForkPoolWorker-7] Task app.tasks.orders.send_order_sms[7e43e3fe-...] succeeded in 0.0008s: 'SMS already sent for order 30'
+[15:59:35,368: INFO/ForkPoolWorker-7] Task app.tasks.orders.generate_order_pdf[7fdea046-...] succeeded in 2.0017s: 'PDF generated for order 1000'
+[15:59:35,372: INFO/ForkPoolWorker-7] Task app.tasks.orders.generate_order_pdf[dc49d2cc-...] succeeded in 0.0008s: 'PDF already generated for order 1000'
+```
+
+### Celery Beat
+
+Лог Beat:
+
+```text
+[2026-10-19 16:01:20,392: INFO/MainProcess] beat: Starting...
+[2026-10-19 16:02:20,413: INFO/MainProcess] Scheduler: Sending due task update-orders-stats-every-minute (app.tasks.stats.update_orders_stats)
+[2026-10-19 16:03:20,410: INFO/MainProcess] Scheduler: Sending due task update-orders-stats-every-minute (app.tasks.stats.update_orders_stats)
+[2026-10-19 16:04:20,410: INFO/MainProcess] Scheduler: Sending due task update-orders-stats-every-minute (app.tasks.stats.update_orders_stats)
+```
+
+Лог воркера и Redis (до 16:02 после миграции было создано 2 заказа, к 16:04 - 10):
+
+```text
+[16:02:20,466: INFO/ForkPoolWorker-7] Task app.tasks.stats.update_orders_stats[685bff94-...] succeeded in 0.042s: 'Orders for 2026-10-19: 2'
+[16:04:25,470: INFO/ForkPoolWorker-9] Task app.tasks.stats.update_orders_stats[10971653-...] succeeded in 0.043s: 'Orders for 2026-10-19: 10'
+
+$ docker compose exec redis redis-cli get stats:orders:2026-10-19
+"12"
+```
+
+С `DEBUG=True` в `.env` в логе воркера виден и сам SQL-запрос задачи (`SELECT count(*) ... WHERE date(orders.created_at) = ...`).
+
+### Воркер выключен
+
+Остановил воркер и создал заказ 40:
+
+```text
+$ time curl -s -X POST ".../orders/create" ...
+{"status":"success","order_id":40}  ... 0,033 total
+$ docker compose exec redis redis-cli llen default
+3
+```
+
+API работает как обычно, три задачи лежат в очереди. После запуска воркера они сразу выполнились (вместе с задачей Beat, которая встала в очередь, пока воркера не было):
+
+```text
+[16:04:25,422: INFO/MainProcess] Task app.tasks.orders.generate_order_pdf[ca122f38-...] received
+[16:04:25,423: INFO/MainProcess] Task app.tasks.orders.send_order_email[046bd140-...] received
+[16:04:25,425: INFO/MainProcess] Task app.tasks.orders.send_order_sms[a9f7631b-...] received
+[16:04:25,426: INFO/MainProcess] Task app.tasks.stats.update_orders_stats[10971653-...] received
+[16:04:26,433: INFO/ForkPoolWorker-1] Task app.tasks.orders.send_order_sms[a9f7631b-...] succeeded in 1.006s: 'SMS sent to +79001234567 for order 40'
+[16:04:27,430: INFO/ForkPoolWorker-7] Task app.tasks.orders.generate_order_pdf[ca122f38-...] succeeded in 2.006s: 'PDF generated for order 40'
+```
+
+(email заказа 40 - кратного 5 - ушёл в ретраи и в DLQ.)
 
 ### Redis выключен (`docker compose stop redis`)
 
-Токен повара взял заранее (логин без Redis не работает: на нём rate limiting из lab3).
-
 ```text
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-Redis недоступен, прогрев кеша меню пропущен
-INFO:     127.0.0.1:40116 - "GET /menu/items HTTP/1.1" 200 OK
-INFO:     127.0.0.1:40136 - "PATCH /menu/items/45 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:40146 - "GET /menu/categories/5 HTTP/1.1" 200 OK
+$ curl -s -X POST ".../orders/create" ...
+Internal Server Error
 ```
 
-Приложение работает, меню читается из БД. До этой доработки было `GET /menu/items HTTP/1.1" 500` с `redis.exceptions.ConnectionError`.
+В логе uvicorn `kombu.exceptions.OperationalError: Error 111 connecting to localhost:6379. Connection refused.` А в БД заказ 41 есть, деньги списаны: `.delay()` вызывается после COMMIT. Клиент получил ошибку, хотя заказ создан, а чек и уведомления потеряны. Это недостаток схемы «сначала БД, потом брокер», в задании его исправлять не требуется; как исправить - в вопросах ниже. После `docker compose start redis` воркер сам переподключился, следующий заказ 42 прошёл нормально.
 
-Заодно увидел недостаток Cache-Aside. Redis при `stop` сохранил снимок на диск (так он настроен по умолчанию) и после `start` поднял старый `menu:all`. Цену блюда 45 поменяли на 80, пока Redis лежал, а кеш вернулся с 75:
+## Известная проблема
+
+После перезапуска Redis в логе Beat (и uvicorn) может появиться:
 
 ```text
-$ redis-cli keys '*'
-menu:all
-rate_limit:127.0.0.1:/auth/login
-$ curl -s http://127.0.0.1:8000/menu/items     (блюдо 45)
-"id":45,"name":"Сок яблочный","price":75.0,...
+Exception ignored in: <function AsyncResult.__del__ ...>
+...
+TypeError: ConnectionPool.get_connection() missing 1 required positional argument: 'command_name'
 ```
 
-Удалить ключ было некому: инвалидация шла, когда Redis не работал. Такие старые данные живут не дольше TTL (5 минут) - для этого TTL и нужен вместе с событийной инвалидацией.
+Это несовместимость Celery 5.6 с redis-py 5.0.3 (версия зафиксирована в `requirements.txt` с lab3): при переподключении Celery вызывает `get_connection()` без аргумента, а в redis-py до 5.3.0 он обязательный. Ошибка «ignored» - в сборщике мусора, Beat продолжает работать (следующая задача отправлена в 16:06:20 как обычно). Исправляется обновлением redis-py до 5.3.0 или новее, но версию из прошлых лаб в этой работе не менял.
 
 ## Ответы на контрольные вопросы
 
-**1. Почему кеширование в Repository, а не в Service? Как это связано с Clean Architecture?**
-Кеш - это способ хранения и чтения данных, то есть инфраструктура, как и SQLAlchemy. Repository - единственный слой, который знает, где лежат данные. Сервис содержит бизнес-правила («нет блюда - ошибка», «название уникально») и не должен знать, откуда пришло меню: из PostgreSQL, Redis или памяти. Если положить Redis в сервис, бизнес-логика начнёт зависеть от конкретной технологии (правило зависимостей нарушено), а unit-тесты сервиса с in-memory репозиторием потребуют Redis. У нас `service.py` не импортирует redis, а тесты сервиса работают без Redis и БД. Заменить Redis на что-то другое - правка одного файла `repository.py`.
+**1. Почему вызов фоновых задач в Service, а не в Router? Как это связано с Clean Architecture?**
+«После заказа сгенерировать чек и отправить уведомления» - это часть сценария оформления заказа, то есть бизнес-правило. Его место - в сервисе, рядом с «проверить баланс» и «списать деньги». Роутер - транспортный слой: принять HTTP, проверить токен, вызвать сервис, перевести ошибки в статусы. Если поставить `.delay()` в роутер, то заказ, созданный другим путём (другой эндпоинт, админка, скрипт, другая очередь), останется без чека и писем - правило размазано по точкам входа. Repository про Celery тоже не знает: он только хранит данные. Сервис при этом не знает ни про Redis, ни про kombu: он вызывает функции из `app.tasks.orders`, а как они попадут в очередь - решает Celery. В unit-тестах эти функции подменяются заглушками, и сервис тестируется без брокера. (Строго говоря, ещё чище было бы передавать в сервис интерфейс «уведомитель», как репозиторий, но методичка допускает прямой вызов задач из сервиса.)
 
-**2. Что такое Cache-Aside и какие у него недостатки?**
-Приложение само управляет кешем: сначала читает из кеша, при промахе читает из БД и кладёт результат в кеш. При изменении данных пишет в БД и удаляет ключ из кеша. Недостатки:
-- первый запрос после промаха медленный (идёт в БД);
-- данные могут быть устаревшими: изменение в обход приложения или потерянное удаление ключа (пример с перезапуском Redis выше) - старое живёт до конца TTL;
-- гонка: запрос прочитал из БД старые данные, в это время другой запрос обновил БД и удалил ключ, а первый записал в кеш уже устаревшее. Тоже лечится TTL;
-- cache stampede при истечении ключа под нагрузкой;
-- логика кеша в коде приложения: про инвалидацию нужно не забыть в каждом месте, где данные меняются.
+**2. Что произойдёт, если Celery-воркер отключится во время выполнения задачи?**
+- Задачи, которые ещё в очереди, не пропадут: они лежат в Redis и будут выполнены, когда воркер вернётся (проверено выше: 3 задачи дождались воркера). API при этом продолжает работать.
+- Обычная остановка (Ctrl+C один раз, warm shutdown) - воркер перестаёт брать новые задачи и доделывает текущие.
+- Если процесс убит посреди задачи (`kill -9`, выключили сервер), по умолчанию эта задача потеряна: Celery подтверждает (ack) сообщение брокеру в момент, когда берёт задачу, а не когда закончил. Чтобы не терять, ставят `acks_late=True` и `task_reject_on_worker_lost=True`: подтверждение после выполнения, а неподтверждённое сообщение Redis-транспорт вернёт в очередь (по истечении `visibility_timeout`, по умолчанию час). Тогда задача может выполниться повторно - и тут нужна идемпотентность.
+- Задачи, отложенные на ретрай (с `countdown`), воркер держит у себя неподтверждёнными, поэтому при падении воркера они вернутся в очередь после `visibility_timeout`.
 
-**3. Что будет, если Redis перезагрузится во время пиковой нагрузки? Как это называется?**
-Кеш станет пустым (если Redis не сохранил снимок на диск), и все запросы разом получат промах и пойдут в БД - «холодный кеш», а массовый одновременный промах - cache stampede (thundering herd, «эффект стада»). Пока Redis лежит, у нас запросы идут прямо в БД (код ловит `ConnectionError`), то есть работает медленно, как до кеша. Когда Redis поднялся, блокировка `lock:menu:all` пропускает в БД только один запрос на ключ, остальные ждут кеш. Наш проверочный скрипт показывает именно это: 40 чтений из БД без защиты и 1 с защитой.
+**3. Что такое идемпотентность и почему она важна для фоновых задач?**
+Идемпотентная операция при повторном выполнении даёт тот же результат, что и при однократном: второй запуск не отправит второе письмо и не создаст второй чек. Celery гарантирует «хотя бы один раз», а не «ровно один»: задача может выполниться повторно из-за ретрая, повторной доставки после падения воркера (`acks_late`), ручного перезапуска из DLQ. Повторный email или SMS клиенту - это заметная ошибка, повторный платёж - потеря денег. У нас перед работой проверяется флаг в Redis, после работы он ставится. Ограничения такого способа: проверка и установка не атомарны (две копии задачи, запущенные одновременно, обе увидят «флага нет»), и если процесс упадёт между отправкой и `setex`, повтор всё-таки отправит письмо. Надёжнее - атомарный `SET key NX` перед работой или ключ идемпотентности, который принимает сам внешний сервис (так умеют многие API рассылок и платежей).
 
-**4. Почему TTL меню 5 минут, а не 1 час?**
-TTL - это максимальное время, сколько пользователь может видеть устаревшее меню, если событийная инвалидация не сработала (меню поменяли прямо в БД, удаление ключа не дошло до Redis). Блюдо закончилось, а его час ещё можно заказать - плохо. С другой стороны, раз в 5 минут один запрос в БД - это ничто по сравнению с сотнями в секунду, выигрыш почти весь сохраняется. Категории меняются ещё реже, им дал 10 минут.
+**4. Зачем нужны ретраи с экспоненциальной задержкой?**
+Ошибки внешних сервисов часто временные: сеть, перезапуск, перегрузка. Повтор через время - и письмо уйдёт. Если повторять сразу, все попытки сгорят за секунду, пока сервис ещё лежит, и каждая попытка его дополнительно нагружает. Экспоненциальная задержка (1, 2, 4, 8 ... с) даёт сервису время подняться, а при долгом сбое запросов становится всё меньше. `retry_backoff_max` ограничивает задержку сверху. Jitter (случайная часть) нужен, когда падают сразу тысячи задач: без него они все повторятся в одну и ту же секунду и снова «положат» сервис (как cache stampede в lab4). `max_retries` - чтобы не повторять бесконечно.
 
-**5. Как событийная инвалидация дополняет инвалидацию по TTL?**
-Событийная даёт свежие данные сразу после изменения через наше API (`invalidate_cache` в сервисе). TTL - страховка на случаи, которые событийная не ловит: изменение в обход API, падение Redis во время удаления, гонка из вопроса 2, ошибка в коде (забыли вызвать `invalidate_cache`). Только TTL - меню устаревает до 5 минут после каждого изменения. Только события - любая потерянная инвалидация оставляет старые данные навсегда.
+**5. Что такое Dead Letter Queue и как её использовать?**
+Отдельная очередь для сообщений, которые не удалось обработать после всех попыток. Зачем: задача не теряется (видно, что именно не отправилось и с какими аргументами), не блокирует основную очередь и не крутится в ретраях вечно. Как используем: смотрим `redis-cli lrange dlq 0 -1` или Broker во Flower, по `root_id` находим во Flower ошибку, исправляем причину и выполняем задачи заново воркером на очередь `dlq` (`celery -A app.core.celery_app worker -Q dlq`) или очищаем очередь (`celery -A app.core.celery_app purge -Q dlq`). В продакшене на размер DLQ ставят алерт: если она растёт, что-то сломалось.
 
-**6. Какие данные в «Сириус.Еде» категорически нельзя кешировать и почему?**
-- Баланс пользователя: по нему списываются деньги, устаревшее значение - заказ без денег или двойное списание.
-- Статус и состав заказа, доставки: повар и курьер должны видеть актуальное состояние, иначе заказ приготовят дважды или потеряют.
-- Права и блокировка пользователя (роль, `is_blocked`): после блокировки или смены роли старые права в кеше дали бы доступ.
-- Refresh-токены и их отзыв: rotation из lab3 проверяет `is_revoked` в БД, с кешем отозванный токен работал бы до конца TTL.
-- Персональные данные (email, телефон, хеш пароля): лишняя копия в ещё одном хранилище.
-Общее правило: нельзя кешировать то, что часто меняется, где ошибка стоит денег или безопасности, и что читают один-два раза (кешировать нет смысла).
+**6. Почему Celery - стандарт индустрии, а не просто threading или asyncio?**
+Поток или `asyncio`-задача (и `BackgroundTasks` FastAPI) живут внутри процесса веб-сервера:
+- перезапуск или падение uvicorn - незаконченные задачи пропали, очереди нет нигде, кроме памяти;
+- тяжёлая работа отнимает CPU у API (GIL), а синхронный код в `asyncio` блокирует весь event loop;
+- нельзя вынести задачи на другие серверы и масштабировать их отдельно от API;
+- ретраи, отложенный запуск, расписание, хранение результатов, мониторинг - всё писать самому.
+У Celery очередь хранится в брокере (переживает перезапуск API), воркеры - отдельные процессы, их можно запустить сколько угодно и на других машинах, есть ретраи с backoff, `countdown`/ETA, Beat, маршрутизация по очередям, Flower. Для лёгкого «записать в лог после ответа» `BackgroundTasks` хватает, для PDF и рассылок - нет.
 
-**7. Как решить cache stampede, если ключей 10 000?**
-- Блокировка на каждый ключ, как у нас: `lock:<ключ>` создаётся только при промахе этого ключа, поэтому 10 000 ключей не мешают друг другу. Это уже работает и для `menu:category:{id}`.
-- Случайный разброс TTL (jitter): `300 + random(0, 60)`. Если ключи заполнялись одновременно (например, прогревом), без разброса они и истекут одновременно, и в БД пойдут тысячи промахов в одну секунду.
-- Вероятностное раннее обновление: незадолго до истечения TTL запрос с небольшой вероятностью сам обновляет ключ, пока остальные читают ещё живой кеш.
-- Прогрев и фоновое обновление самых популярных ключей задачей по расписанию, до истечения TTL.
-
-## Вопросы из рефлексии (шаг 6)
-
-**Что будет, если TTL истечёт во время пиковой нагрузки?**
-Cache stampede: все запросы, пришедшие до того, как первый заполнит кеш, идут в БД. У нас - до 40 одновременных одинаковых запросов (размер пула потоков). С блокировкой - 1.
-
-**Что если меню будет меняться каждую минуту?**
-Кеш будет сбрасываться каждую минуту, и раз в минуту один запрос пойдёт в БД (с блокировкой - ровно один). При сотнях запросов в секунду это всё равно почти 100% попаданий, кеш полезен. Плохо стало бы, если бы данные менялись чаще, чем читаются: тогда кеш только мешает (лишние операции в Redis и сброс на каждое изменение).
-
-**Что будет, если Redis упадёт?**
-В нашей версии - приложение продолжит работать, меню читается из БД, то есть так же медленно, как в замере «до». Логин при этом не работает: на Redis rate limiting из lab3. Проверка выше.
+**7. Чем Celery Beat отличается от обычной задачи?**
+Обычную задачу ставит в очередь код в ответ на событие: создан заказ -> `.delay()`. Beat - отдельный процесс-планировщик: по расписанию (`beat_schedule`: интервал или crontab) он сам кладёт задачу в очередь. Выполняет её всё равно обычный воркер, Beat только «нажимает кнопку». Сама `update_orders_stats` - обычная задача, её можно вызвать и вручную через `.delay()`. Beat должен быть запущен в одном экземпляре: два Beat поставят каждую задачу дважды. Своё состояние (когда что запускал) он хранит в файле `celerybeat-schedule` (добавлен в `.gitignore`).
 
 ## Другие вопросы, которые могут задать
 
-**Что такое hit и miss?**
-Hit - данные нашлись в кеше, в БД не ходим. Miss - в кеше нет (ещё не клали, истёк TTL или удалили инвалидацией), идём в БД и кладём в кеш.
+**Что делает `.delay()` и чем отличается от вызова функции?**
+`generate_order_pdf(30)` выполнит функцию здесь и сейчас, в процессе FastAPI. `generate_order_pdf.delay(30)` сериализует имя задачи и аргументы в JSON, кладёт сообщение в Redis и сразу возвращает `AsyncResult` с id задачи. `.delay(*args)` - короткая форма `.apply_async(args=...)`; у `apply_async` есть ещё параметры: `countdown`, `queue` и т.д.
 
-**Почему `SETEX`, а не `SET`?**
-`SETEX key ttl value` ставит значение и время жизни одной командой. Если сделать `SET`, а потом `EXPIRE`, и между ними процесс упадёт, ключ останется навсегда без TTL.
+**Почему в задачу передаётся `order_id` и email, а не объект заказа?**
+Аргументы уходят в JSON - ORM-объект туда не сериализуется. К тому же объект к моменту выполнения мог бы устареть, а сообщение в очереди должно быть маленьким.
 
-**Почему у блокировки `timeout=10`?**
-Если процесс взял блокировку и упал (или завис), без таймаута ключ `lock:menu:all` остался бы навсегда, и в БД не пошёл бы больше никто - все ждали бы вечно. С таймаутом через 10 секунд блокировка снимется сама.
+**Где хранятся результаты задач и зачем backend?**
+В Redis, ключи `celery-task-meta-<id>`, сутки. По ним `AsyncResult.get()` получает результат (так проверялась идемпотентность), а Flower показывает статус. Сам сервис результаты не ждёт.
 
-**Почему блокировка в Redis, а не `threading.Lock` / `asyncio.Lock`?**
-Локальная блокировка работает только внутри одного процесса. При `uvicorn --workers 4` или нескольких репликах у каждого процесса своя, и в БД пойдёт по запросу от каждого. Блокировка в Redis одна на всех. К тому же эндпоинты у нас синхронные (выполняются в потоках), `asyncio.Lock` для них не подходит.
+**Почему ответ 15 мс, а не 50-100 мс, как в методичке?**
+Всё локально и без нагрузки. Из 15 мс почти всё - сам эндпоинт: проверка токена, загрузка пользователя и блюда, два COMMIT в PostgreSQL. `.delay()` - одна команда в Redis, доли миллисекунды.
 
-**Почему эндпоинты меню без токена?**
-Меню - публичная информация, её видит любой студент, и методичка для замера сама предлагает сделать эндпоинт публичным. Менять меню по-прежнему могут только `admin` и `cook`.
+**Почему задачи заказа выполняются параллельно?**
+Воркер по умолчанию запускает пул процессов по числу ядер (`concurrency: 12 (prefork)`), три задачи попадают в разные процессы. Это видно по `ForkPoolWorker-8`, `-1`, `-7` в логе.
 
-**Что лежит в кеше? Не попадёт ли туда лишнее?**
-Только то, что и так отдаётся всем: id, название, цена, доступность, категория блюда. Ничего про пользователей. Посмотреть: `docker compose exec redis redis-cli get menu:all`.
+**Что будет, если упадёт Redis?**
+Проверено выше: `.delay()` бросает `OperationalError`, клиент получает 500, хотя заказ уже сохранён и деньги списаны, а чек и письма не будут отправлены. (Вход тоже не работает - на Redis rate limiting из lab3.) Исправить можно паттерном transactional outbox: в той же транзакции, что и заказ, пишется строка в таблицу «нужно отправить», а отдельный процесс перекладывает такие строки в брокер, когда он доступен. Попроще - ловить ошибку брокера и возвращать успех, но тогда уведомления теряются молча.
 
-**Почему RPS вырос в 1.5 раза, а время ответа упало в 2.5 раза?**
-Пользователи Locust ждут ответ, а потом ещё 0.1–0.5 с. Чем быстрее ответ, тем чаще каждый пользователь шлёт следующий запрос, но 500 пользователей всё равно не могут дать больше ~1600 запросов в секунду. А сервер упирается в одно ядро CPU (см. `top` выше), поэтому RPS ограничен им, а не базой.
+**Почему воркер запускается с `-Q default`?**
+Без `-Q` он слушает все очереди из `task_queues`, в том числе `dlq`, и сразу же снова выполнял бы упавшие задачи - DLQ потеряла бы смысл.
 
-**Как убедиться, что запрос пришёл из кеша?**
-Включить `DEBUG=True`: SQLAlchemy печатает каждый SQL. При hit в логе нет `SELECT ... FROM menu_items`, при miss - есть. Или смотреть счётчик `pg_stat_user_tables`, как в замерах.
+**Как Flower видит задачи, если у воркера `task events: OFF`?**
+Flower при подключении сам отправляет воркерам команду включить события (`Events of group {task} enabled by remote` в логе воркера). Можно и сразу запускать воркер с `-E`.
+
+**Можно ли оставить Flower открытым в продакшене?**
+Нет: без настроек у него нет пароля, а через него видны аргументы задач (email, телефоны) и можно управлять воркерами. Нужна авторизация (`--basic-auth=user:password` или OAuth) и закрытый порт.
+
+**Почему статистика в Redis, а не в таблице?**
+Задание разрешает Redis. Это одно число на день, оно пересчитывается каждую минуту целиком, поэтому потерять его не страшно - через минуту будет снова. Для отчётов за длинный период лучше была бы таблица.
+
+**Что значит `timezone="UTC"`?**
+Время в Celery (ETA, Beat-расписания crontab, время во Flower) считается в UTC. На наш интервал «каждые 60 секунд» это не влияет. Поэтому во Flower время на 3 часа меньше, чем в логах воркера.
