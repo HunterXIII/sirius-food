@@ -2,6 +2,8 @@
 Слой бизнес-логики модуля заказов.
 Здесь нет импортов fastapi и sqlalchemy: сервис не знает ни про HTTP, ни про БД.
 """
+import time
+
 from app.exceptions import NotFoundError, AccessDeniedError
 from app.modules.orders.repository import OrderRepository
 
@@ -37,7 +39,14 @@ class OrderService:
 
         # Списываем деньги и сохраняем заказ. Как именно - решает репозиторий.
         self.repository.update_user_balance(user, user.balance - total_cost)
-        return self.repository.save_order(user_id, item_id, quantity, status="processing")
+        order_id = self.repository.save_order(user_id, item_id, quantity, status="processing")
+
+        # Имитация тяжёлых операций (пока синхронно)
+        time.sleep(2)  # генерация PDF
+        time.sleep(1)  # отправка email
+        time.sleep(1)  # отправка SMS
+
+        return order_id
 
     def get_kitchen_orders(self) -> list:
         """Заказы, которые кухне нужно приготовить (статус processing)."""
