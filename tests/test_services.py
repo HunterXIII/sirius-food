@@ -4,6 +4,7 @@ PostgreSQL не нужен: в сервисы передаются in-memory р�
 Запуск: python -m unittest discover tests -v
 """
 import unittest
+from unittest.mock import patch
 
 from app import memory_db
 from app.core.security import verify_password
@@ -43,6 +44,11 @@ class OrderServiceTest(unittest.TestCase):
             id=2, name="Компот", price=50.0, is_available=False
         )
         self.service = OrderService(InMemoryOrderRepository())
+        # Задачи Celery не ставим в настоящую очередь Redis: подменяем их заглушками.
+        for task in ("generate_order_pdf", "send_order_email", "send_order_sms"):
+            patcher = patch(f"app.modules.orders.service.{task}")
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_create_order_writes_off_balance(self):
         order_id = self.service.create_order(user_id=1, item_id=1, quantity=2)

@@ -5,6 +5,7 @@ PostgreSQL не нужен: репозитории переключаются н
 Запуск: python -m unittest discover tests -v
 """
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -57,6 +58,11 @@ class SecurityTest(unittest.TestCase):
         # Сбросить счётчики rate limiting, иначе тесты мешают друг другу.
         for key in redis_client.scan_iter("rate_limit:*"):
             redis_client.delete(key)
+        # Задачи Celery не ставим в настоящую очередь Redis: подменяем их заглушками.
+        for task in ("generate_order_pdf", "send_order_email", "send_order_sms"):
+            patcher = patch(f"app.modules.orders.service.{task}")
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         # Студенты 1 и 2, повар 3, курьеры 4 и 5.
         add_user(1, "ivan@sirius.ru", balance=1000)

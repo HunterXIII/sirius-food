@@ -2,10 +2,9 @@
 Слой бизнес-логики модуля заказов.
 Здесь нет импортов fastapi и sqlalchemy: сервис не знает ни про HTTP, ни про БД.
 """
-import time
-
 from app.exceptions import NotFoundError, AccessDeniedError
 from app.modules.orders.repository import OrderRepository
+from app.tasks.orders import generate_order_pdf, send_order_email, send_order_sms
 
 
 class OrderService:
@@ -41,10 +40,13 @@ class OrderService:
         self.repository.update_user_balance(user, user.balance - total_cost)
         order_id = self.repository.save_order(user_id, item_id, quantity, status="processing")
 
-        # Имитация тяжёлых операций (пока синхронно)
-        time.sleep(2)  # генерация PDF
-        time.sleep(1)  # отправка email
-        time.sleep(1)  # отправка SMS
+        # Тяжёлые операции - в фоне. .delay() только кладёт задачу в очередь (Redis)
+        # и сразу возвращает управление, выполнит задачу воркер Celery.
+        generate_order_pdf.delay(order_id)
+        send_order_email.delay(order_id, user.email)
+        # Телефон при регистрации необязателен: нет телефона - не отправляем SMS.
+        if user.phone:
+            send_order_sms.delay(order_id, user.phone)
 
         return order_id
 
