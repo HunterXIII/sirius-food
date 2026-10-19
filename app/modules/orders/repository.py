@@ -4,7 +4,9 @@
 Бизнес-правил здесь нет.
 """
 from abc import ABC, abstractmethod
+from datetime import date, datetime
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import memory_db
@@ -46,6 +48,10 @@ class OrderRepository(ABC):
     def update_order(self, order) -> None:
         """Сохранить изменения заказа."""
 
+    @abstractmethod
+    def count_orders_by_day(self, day: date) -> int:
+        """Сколько заказов создано в этот день."""
+
 
 class PostgresOrderRepository(OrderRepository):
     """Реализация для PostgreSQL через SQLAlchemy ORM."""
@@ -86,6 +92,10 @@ class PostgresOrderRepository(OrderRepository):
         self.db.add(order)
         self.db.commit()
 
+    def count_orders_by_day(self, day: date) -> int:
+        # SELECT count(*) FROM orders WHERE date(created_at) = :day
+        return self.db.query(Order).filter(func.date(Order.created_at) == day).count()
+
 
 class InMemoryOrderRepository(OrderRepository):
     """Реализация, которая хранит данные в памяти (app/memory_db.py)."""
@@ -104,6 +114,7 @@ class InMemoryOrderRepository(OrderRepository):
             item_id=item_id,
             quantity=quantity,
             status=status,
+            created_at=datetime.now(),
         )
         return order_id
 
@@ -118,6 +129,12 @@ class InMemoryOrderRepository(OrderRepository):
 
     def update_order(self, order) -> None:
         memory_db.orders[order.id] = order
+
+    def count_orders_by_day(self, day: date) -> int:
+        return len([
+            order for order in memory_db.orders.values()
+            if order.created_at and order.created_at.date() == day
+        ])
 
 
 def get_order_repository(db: Session) -> OrderRepository:

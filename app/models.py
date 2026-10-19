@@ -1,6 +1,8 @@
 """
 Определение ORM-моделей предметной области «Сириус.Еда».
 """
+from datetime import datetime
+
 from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -70,6 +72,9 @@ class Order(Base):
     item_id = Column(Integer, ForeignKey("menu_items.id"))
     quantity = Column(Integer, nullable=False)
     status = Column(String, default="processing")
+    # Время создания (lab5, для статистики). Ставит SQLAlchemy при INSERT.
+    # У заказов, созданных до lab5, его нет.
+    created_at = Column(DateTime, default=datetime.now, nullable=True)
 
     user = relationship("User")
     item = relationship("MenuItem")

@@ -1,6 +1,7 @@
 """
 Настройка Celery. Брокер и хранилище результатов - Redis.
 Запуск воркера: celery -A app.core.celery_app worker -Q default --loglevel=info
+Запуск Beat:    celery -A app.core.celery_app beat --loglevel=info
 """
 from celery import Celery, Task
 from celery.utils.log import get_task_logger
@@ -19,7 +20,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     # Модули с задачами. Воркер запускается с -A app.core.celery_app и импортирует
     # только этот файл. Без include он не знает задач и пишет "unregistered task".
-    include=["app.tasks.orders"],
+    include=["app.tasks.orders", "app.tasks.stats"],
 )
 
 # Настройки сериализации: JSON вместо pickle (безопаснее).
@@ -42,6 +43,16 @@ celery_app.conf.task_queues = (
 celery_app.conf.task_default_queue = "default"
 celery_app.conf.task_default_exchange = "default"
 celery_app.conf.task_default_routing_key = "default"
+
+# Расписание для Celery Beat (отдельный процесс: celery -A app.core.celery_app beat).
+# Beat сам задачи не выполняет, а раз в минуту кладёт задачу в очередь default,
+# выполняет её обычный воркер.
+celery_app.conf.beat_schedule = {
+    "update-orders-stats-every-minute": {
+        "task": "app.tasks.stats.update_orders_stats",
+        "schedule": 60.0,  # секунды
+    },
+}
 
 
 class TaskWithDLQ(Task):

@@ -52,6 +52,7 @@ class OrderRecord:
     item_id: int
     quantity: int
     status: str
+    created_at: datetime | None = None
 
 
 @dataclass

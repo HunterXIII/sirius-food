@@ -50,6 +50,10 @@ class OrderService:
 
         return order_id
 
+    def count_orders_by_day(self, day) -> int:
+        """Статистика: сколько заказов сделано за день (считает периодическая задача)."""
+        return self.repository.count_orders_by_day(day)
+
     def get_kitchen_orders(self) -> list:
         """Заказы, которые кухне нужно приготовить (статус processing)."""
         return self.repository.get_orders_by_status("processing")
