@@ -11,8 +11,7 @@ import matplotlib.pyplot as plt
 
 RUNS = {
     "до кеша": "loadtest/before",
-    "с кешем (шаг 5)": "loadtest/after",
-    "итог (stampede, категории)": "loadtest/final",
+    "с кешем": "loadtest/final",
 }
 
 
