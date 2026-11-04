@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package delivery;
+
+service DeliveryService {
+  rpc AssignCourier(AssignCourierRequest) returns (AssignCourierResponse);
+  rpc CompleteDelivery(CompleteDeliveryRequest) returns (CompleteDeliveryResponse);
+  rpc GetDelivery(GetDeliveryRequest) returns (GetDeliveryResponse);
+  rpc TrackDelivery(TrackDeliveryRequest) returns (stream DeliveryStatus);
+  rpc ChatWithCourier(stream ChatMessage) returns (stream ChatMessage);
+}
+
+message AssignCourierRequest {
+  int32 order_id = 1;
+  int32 courier_id = 2;
+}
+
+message AssignCourierResponse {
+  int32 delivery_id = 1;
+  string status = 2;
+}
+
+message CompleteDeliveryRequest {
+  int32 delivery_id = 1;
+  int32 user_id = 2;
+}
+
+message CompleteDeliveryResponse {
+  string status = 1;
+}
+
+message GetDeliveryRequest {
+  oneof lookup {
+    int32 order_id = 1;
+    int32 delivery_id = 2;
+  }
+  int32 user_id = 3;
+}
+
+message GetDeliveryResponse {
+  int32 id = 1;
+  string status = 2;
+  int32 courier_id = 3;
+  int32 order_id = 4;
+}
+
+message TrackDeliveryRequest {
+  int32 delivery_id = 1;
+  int32 user_id = 2;
+}
+
+message DeliveryStatus {
+  string status = 1;
+}
+
+message ChatMessage {
+  string text = 1;
+}

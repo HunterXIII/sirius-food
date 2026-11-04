@@ -1,401 +1,429 @@
-# Лабораторная работа № 5
-
-## Асинхронность и фоновые задачи: внедрение Celery
-
-Дисциплина: Разработка программных модулей и приложений для серверов  
-Тема: Асинхронность и фоновые задачи в production: Celery, идемпотентность, ретраи, Dead Letter Queue  
-Продолжительность: 2 академических часа (90 минут) + самостоятельная работа  
-Проект: сквозной пет-проект «Сириус.Еда»  
+# Практическая работа № 6
+Удушение монолита: вынос модуля delivery в gRPC-микросервис
+Дисциплина: Разработка программных модулей и приложений для серверов
+Тема: Межсервисное взаимодействие на базе gRPC и паттерн Strangler Fig
+Продолжительность: 2 академических часа (90 минут) + самостоятельная работа
+Проект: сквозной пет-проект «Сириус.Еда»
 Операционная система: Ubuntu 22.04 LTS или новее
 
-(Условия прошлых работ - в коммитах с тегами: `git show lab2:task.md`, `git show lab3:task.md`, `git show lab4:task.md`.)
 
-### Цели работы
+## Цели работы
 
 В ходе выполнения лабораторной работы вы:
-
-- Замерите базовое время ответа эндпоинта `POST /orders/create` при синхронном выполнении тяжёлых операций (генерация PDF, отправка email, SMS).
-- Подключите Celery и Redis в качестве брокера сообщений для выполнения фоновых задач.
-- Вынесете тяжёлые операции в фон: создание заказа будет мгновенно отвечать клиенту, а PDF, email и SMS — выполняться в отдельных воркерах.
-- Настроите ретраи с экспоненциальной задержкой и Dead Letter Queue (DLQ) для обработки ошибок внешних сервисов.
-- Реализуете идемпотентность задач, чтобы повторный запуск не создавал дубликаты чеков или писем.
-- Проведёте повторные замеры и докажете, что время ответа API сократилось в десятки раз.
-
+Освоите принципы межсервисного взаимодействия на базе бинарного протокола gRPC.
+Научитесь описывать контракты с помощью Protocol Buffers (.proto).
+Реализуете отдельный gRPC-микросервис, вынеся бизнес-логику модуля delivery из монолита.
+Интегрируете gRPC-клиент в монолит, заменив прямые вызовы к базе данных на сетевые вызовы.
+Примените паттерн Strangler Fig для постепенного отказа от монолитной архитектуры.
+Обеспечите отказоустойчивость: научитесь обрабатывать сетевые ошибки и таймауты.
 Дополнительно (для 9–10 баллов):
+Реализуете Server Streaming для трекинга доставки в реальном времени.
+Реализуете Bidirectional Streaming для чата между клиентом и курьером.
 
-- Настроите мониторинг задач через Flower и убедитесь, что задачи видны в реальном времени.
-- Реализуете периодические задачи через Celery Beat.
 
-### Критерии оценивания (10-балльная шкала)
 
-| Баллы | Оценка | Что нужно сделать |
-|---|---|---|
-| 0–3 | Неудовлетворительно (2) | Celery не подключён, фоновые задачи не работают, проект не запускается. Нарушены границы Clean Architecture (задачи вызываются напрямую из роутера, а не из Service). |
-| 4–5 | Удовлетворительно (3) | Celery подключён, но вынос задач выполнен частично (например, только PDF, но email остался синхронным). Время ответа API не сократилось. |
-| 6–7 | Хорошо (4) | Celery подключён, все тяжёлые операции (PDF, email, SMS) вынесены в фон. Эндпоинт `POST /orders/create` отвечает мгновенно. Проект полностью работоспособен в Swagger. Замеры «до/после» проведены. |
-| 8 | Отлично (5) | Все требования уровня 6–7 выполнены. Дополнительно: настроены ретраи с экспоненциальной задержкой и Dead Letter Queue. Реализована идемпотентность (повторный запуск не создаёт дубль). Оформлен `README.md` со сравнительными графиками. Устная защита демонстрирует понимание. |
-| 9 | Отлично с плюсом (5+) | Все требования уровня 8 выполнены. Дополнительно: настроен мониторинг задач через Flower. В `README.md` есть скриншоты из Flower, подтверждающие выполнение задач в реальном времени. |
-| 10 | Отлично с двойным плюсом (5++) | Все требования уровня 9 выполнены. Дополнительно: реализована периодическая задача через Celery Beat (очистка старых записей или обновление статистики). |
+## Критерии оценивания (10-балльная шкала)
 
-### 1. Пререквизиты
+Баллы
+Оценка
+Что нужно сделать
+0–3
+Неудовлетворительно (2)
+.proto не создан или содержит ошибки. gRPC-сервер не запускается. Интеграция с монолитом не выполнена.
+4–5
+Удовлетворительно (3)
+.proto создан, код сгенерирован. Однако gRPC-сервер не отвечает на запросы, или монолит не может к нему подключиться.
+6–7
+Хорошо (4)
+gRPC-сервер работает. Монолит успешно вызывает методы gRPC-сервиса. Два процесса запущены параллельно и корректно взаимодействуют.
+8
+Отлично (5)
+Все требования уровня 6–7 выполнены. Дополнительно: реализована обработка сетевых ошибок (UNAVAILABLE, таймауты). Оформлен README.md с архитектурной схемой. Устная защита демонстрирует понимание.
+9
+Отлично с плюсом (5+)
+Все требования уровня 8 выполнены. Дополнительно: реализован Server Streaming (метод TrackDelivery, транслирующий статусы доставки).
+10
+Отлично с двойным плюсом (5++)
+Все требования уровня 9 выполнены. Дополнительно реализовано: Bidirectional Streaming (чат с курьером).
+
+
+## 1. Пререквизиты
 
 Для выполнения работы вам потребуется:
-
-- Ubuntu 22.04 LTS;
-- Python 3.11 или новее;
-- Docker Engine и Docker Compose (запущены db и redis);
-- Git;
-- выполненные лабораторные работы № 2, № 3 и № 4 (архитектура, безопасность, кеширование).
-
-#### Установка дополнительных зависимостей
-
-- `celery` — библиотека для фоновых задач.
-- `flower` — веб-интерфейс для мониторинга Celery (для 9 баллов).
+Ubuntu 22.04 LTS;
+Python 3.11 или новее;
+Docker Engine и Docker Compose (запущены db и redis);
+Git;
+выполненные лабораторные работы № 2–5 (монолит отрефакторен, внедрены безопасность, кеш и фоновые задачи).
+Установка дополнительных зависимостей
+Нам понадобятся библиотеки для работы с gRPC:
+grpcio — runtime-библиотека, обеспечивающая сетевую передачу по HTTP/2.
+grpcio-tools — компилятор, который генерирует Python-код (Stub и Message-классы) из .proto-файла.
 
 ```bash
 source .venv/bin/activate
-pip install celery flower
+pip install grpcio grpcio-tools
 ```
 
-#### Запуск инфраструктуры
-
-Убедимся, что PostgreSQL и Redis запущены (Redis уже используется для кеша и rate limiting):
+Запуск инфраструктуры
+Убедимся, что PostgreSQL и Redis запущены:
 
 ```bash
 docker compose up -d db redis
 ```
 
-### 2. Теоретическое введение
 
-#### 2.1. Проблема синхронной обработки
 
-Сейчас в «Сириус.Еде» эндпоинт `POST /orders/create` выполняет всё синхронно. В проекте ещё нет реальных операций генерации PDF, отправки email и SMS. Мы добавим их как заглушки с искусственной задержкой (`time.sleep()`), чтобы имитировать тяжёлые операции. Это позволит увидеть проблему синхронности и эффект от внедрения Celery.
+## 2. Теоретическое введение
 
-Что делает эндпоинт сейчас:
+2.1. Паттерн Strangler Fig (Душитель)
+Паттерн подразумевает постепенную замену частей монолитной системы на микросервисы. Вы не переписываете всё приложение сразу. Вместо этого вы «вырезаете» один модуль (в нашем случае delivery), разворачиваете его как отдельный сервис и перенаправляете вызовы к нему. Монолит при этом продолжает работать, но становится «худее».
+2.2. Архитектура gRPC
+В gRPC взаимодействие строится на трёх компонентах:
+Контракт (.proto) — строгое описание методов и типов данных.
+Сервер — класс, наследующий сгенерированный Servicer, содержащий бизнес-логику.
+Клиент (Stub) — сгенерированный класс, который позволяет вызывать методы сервера так, как будто они находятся локально.
+2.3. Ключевой архитектурный принцип
+В Clean Architecture gRPC-клиент должен находиться в инфраструктурном слое. Бизнес-логика (Service) не должна знать, что данные пришли по сети. Она должна работать с абстракцией (интерфейсом), как мы делали это с Repository.
 
-1. Создаёт заказ в PostgreSQL.
-2. Имитирует генерацию PDF (`time.sleep(2)`).
-3. Имитирует отправку email (`time.sleep(1)`).
-4. Имитирует отправку SMS (`time.sleep(1)`).
-5. Начисляет бонусы (быстрая операция).
 
-Результат: клиент ждёт 4–5 секунд.
 
-#### 2.2. Что такое фоновая задача
+## 3. Практическая часть
 
-Фоновая задача — это работа, которую можно выполнить после ответа клиенту, в отдельном процессе. Клиент получает ответ за 50 мс, а PDF, email и SMS генерируются в фоне.
 
-Ключевые компоненты Celery:
+### Этап 1. Создание gRPC-контракта
 
-- Producer — приложение FastAPI, которое ставит задачи.
-- Broker — очередь (Redis), где хранятся задачи.
-- Worker — отдельный процесс, который забирает задачи из очереди и выполняет их.
+Что делаем: создаём файл delivery.proto, в котором описываем методы, которые монолит будет вызывать у нового микросервиса.
+Зачем: .proto-файл — это единый источник правды. Он гарантирует, что клиент и сервер говорят на одном языке.
+Создайте в корне проекта папку proto и файл proto/delivery.proto:
 
-Где реализовывать вызов задач: в слое Service. Это бизнес-логика: «после создания заказа — сгенерировать чек и отправить уведомления». Repository и API не должны знать о Celery.
+```protobuf
+syntax = "proto3";
 
-#### 2.3. Почему возникают дубли при ретраях
+// Пакет для генерации Python-кода.
+package delivery;
 
-Когда задача падает, Celery запускает её повторно. Если задача уже частично выполнилась (например, email был отправлен, но упало на следующем шаге), повторный запуск создаст дубль. Идемпотентность решает эту проблему: задача проверяет, была ли она уже выполнена, и пропускает повторную работу.
+// Описание сервиса доставки.
+service DeliveryService {
+  // Назначение курьера на заказ.
+  rpc AssignCourier(AssignCourierRequest) returns (AssignCourierResponse);
 
-### 3. Пошаговый разбор внедрения фоновых задач
+  // Завершение доставки.
+  rpc CompleteDelivery(CompleteDeliveryRequest) returns (CompleteDeliveryResponse);
 
-#### Шаг 1. Замер baseline (10 минут)
+  // Получение информации о доставке.
+  rpc GetDelivery(GetDeliveryRequest) returns (GetDeliveryResponse);
+}
 
-Что делаем: замеряем время ответа `POST /orders/create` до внедрения Celery.  
-Зачем: чтобы зафиксировать проблему и потом сравнить результат.
+// --- Сообщения для AssignCourier ---
+message AssignCourierRequest {
+  int32 order_id = 1;
+  int32 courier_id = 2;
+}
 
-Добавьте в `OrderService.create_order()` имитацию тяжёлых операций:
+message AssignCourierResponse {
+  int32 delivery_id = 1;
+  string status = 2;
+}
 
-```python
-# app/modules/orders/service.py
-import time
+// --- Сообщения для CompleteDelivery ---
+message CompleteDeliveryRequest {
+  int32 delivery_id = 1;
+}
 
-class OrderService:
-    # ... предыдущий код ...
+message CompleteDeliveryResponse {
+  string status = 1;
+}
 
-    def create_order(self, customer_id: int, item_id: int, quantity: int) -> Order:
-        # ... создание заказа ...
-        order = self.repository.save_order(customer_id, item_id, quantity, total)
+// --- Сообщения для GetDelivery ---
+message GetDeliveryRequest {
+  int32 order_id = 1;
+}
 
-        # Имитация тяжёлых операций (пока синхронно)
-        time.sleep(2)  # генерация PDF
-        time.sleep(1)  # отправка email
-        time.sleep(1)  # отправка SMS
-
-        return order
+message GetDeliveryResponse {
+  int32 id = 1;
+  string status = 2;
+  int32 courier_id = 3;
+}
 ```
 
-Замерьте время ответа через curl с командой `time`:
+
+### Этап 2. Генерация Python-кода
+
+Что делаем: запускаем компилятор protoc, который сгенерирует два Python-файла на основе нашего контракта.
+Зачем: писать сериализацию Protobuf и сетевую обвязку вручную — долго и чревато ошибками. Компилятор делает это автоматически.
+Выполните в терминале:
 
 ```bash
-time curl -X POST "http://127.0.0.1:8000/orders/create" -H "Authorization: Bearer YOUR_TOKEN" -H "Content-Type: application/json" -d '{"item_id": 1, "quantity": 2}'
+python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/delivery.proto
 ```
 
-Ожидаемый результат: время ответа около 4 секунд.
+Что произошло: в корне проекта появились файлы delivery_pb2.py (классы сообщений) и delivery_pb2_grpc.py (серверные и клиентские заглушки).
 
-#### Шаг 2. Настройка Celery (15 минут)
 
-Что делаем: создаём приложение Celery и подключаем его к Redis.  
-Зачем: Celery — это менеджер фоновых задач. Он будет принимать задачи от FastAPI и передавать их воркерам.
+### Этап 3. Реализация gRPC-сервера
 
-Создайте файл `app/core/celery_app.py`:
-
-```python
-# app/core/celery_app.py
-from celery import Celery
-from app.core.config import settings
-
-# Создаём приложение Celery.
-# Брокер (Redis) — сюда FastAPI ставит задачи.
-# Backend (Redis) — сюда сохраняются результаты выполнения.
-celery_app = Celery(
-    "sirius_food",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
-)
-
-# Настройки сериализации: JSON вместо pickle (безопаснее).
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="UTC",
-    enable_utc=True,
-)
-```
-
-#### Шаг 3. Создание фоновых задач (20 минут)
-
-Что делаем: создаём задачи для генерации PDF и отправки email.  
-Зачем: это те операции, которые будут выполняться в фоне.
-
-Создайте файл `app/tasks/orders.py` (и папку `app/tasks/` с `__init__.py`):
+Что делаем: создаём отдельный процесс-сервер, который будет обслуживать вызовы от монолита.
+Зачем: это и есть наш новый микросервис. Он содержит бизнес-логику доставки.
+Создайте файл delivery_server.py в корне проекта (рядом с app):
 
 ```python
-# app/tasks/orders.py
+"""
+Микросервис доставки. Работает как отдельный процесс.
+Слушает порт 50051 и обслуживает gRPC-вызовы от монолита.
+"""
+import grpc
+from concurrent import futures
 import time
-from app.core.celery_app import celery_app
+
+# Импорт сгенерированных классов.
+import delivery_pb2
+import delivery_pb2_grpc
+
+# Импорт инфраструктуры монолита для работы с БД.
+# В реальном проекте у микросервиса была бы своя БД и модели.
+from app.database import SessionLocal
+from app.models import Delivery, Order
 
 
-@celery_app.task
-def generate_order_pdf(order_id: int) -> str:
+class DeliveryServiceServicer(delivery_pb2_grpc.DeliveryServiceServicer):
     """
-    Генерация PDF-чека для заказа.
-    Имитация тяжёлой операции через time.sleep.
+    Реализация бизнес-логики модуля доставки.
     """
-    time.sleep(2)
-    return f"PDF generated for order {order_id}"
+
+    def AssignCourier(self, request, context):
+        """Назначение курьера на заказ."""
+        db = SessionLocal()
+        try:
+            # Проверка, что заказ существует.
+            order = db.query(Order).filter(Order.id == request.order_id).first()
+            if not order:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Order not found")
+
+            # Создание доставки.
+            delivery = Delivery(
+                order_id=request.order_id,
+                courier_id=request.courier_id,
+                status="in_progress"
+            )
+            db.add(delivery)
+            db.commit()
+            db.refresh(delivery)
+
+            return delivery_pb2.AssignCourierResponse(
+                delivery_id=delivery.id,
+                status=delivery.status
+            )
+        finally:
+            db.close()
+
+    def CompleteDelivery(self, request, context):
+        """Завершение доставки."""
+        db = SessionLocal()
+        try:
+            delivery = db.query(Delivery).filter(Delivery.id == request.delivery_id).first()
+            if not delivery:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Delivery not found")
+
+            delivery.status = "completed"
+            db.commit()
+
+            return delivery_pb2.CompleteDeliveryResponse(status=delivery.status)
+        finally:
+            db.close()
+
+    def GetDelivery(self, request, context):
+        """Получение информации о доставке по ID заказа."""
+        db = SessionLocal()
+        try:
+            delivery = db.query(Delivery).filter(Delivery.order_id == request.order_id).first()
+            if not delivery:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Delivery not found")
+
+            return delivery_pb2.GetDeliveryResponse(
+                id=delivery.id,
+                status=delivery.status,
+                courier_id=delivery.courier_id
+            )
+        finally:
+            db.close()
 
 
-@celery_app.task
-def send_order_email(order_id: int, email: str) -> str:
-    """Отправка email о создании заказа."""
-    time.sleep(1)
-    return f"Email sent to {email} for order {order_id}"
+def serve():
+    """Запуск gRPC-сервера."""
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    delivery_pb2_grpc.add_DeliveryServiceServicer_to_server(
+        DeliveryServiceServicer(), server
+    )
+    server.add_insecure_port('[::]:50051')
+    server.start()
+    print("Delivery gRPC Server running on port 50051")
+    try:
+        while True:
+            time.sleep(86400)
+    except KeyboardInterrupt:
+        server.stop(0)
 
 
-@celery_app.task
-def send_order_sms(order_id: int, phone: str) -> str:
-    """Отправка SMS о создании заказа."""
-    time.sleep(1)
-    return f"SMS sent to {phone} for order {order_id}"
+if __name__ == '__main__':
+    serve()
 ```
 
-#### Шаг 4. Вызов задач из Service (15 минут)
 
-Что делаем: заменяем синхронные вызовы на фоновые задачи.  
-Зачем: сервис не должен ждать, пока выполнятся тяжёлые операции. Он ставит задачу в очередь и сразу возвращает результат.
+### Этап 4. Интеграция клиента в монолит
 
-Обновите `OrderService.create_order()`:
+Что делаем: создаём класс-клиент в монолите, который будет общаться с gRPC-сервером.
+Зачем: бизнес-логика монолита (Service) не должна знать про сеть. Мы создаём адаптер (как Repository), который скрывает gRPC.
+Создайте файл app/modules/delivery/grpc_client.py:
 
 ```python
-# app/modules/orders/service.py
-from app.tasks.orders import generate_order_pdf, send_order_email, send_order_sms
+"""
+gRPC-клиент для общения с микросервисом доставки.
+Является адаптером между бизнес-логикой монолита и сетью.
+"""
+import grpc
+import delivery_pb2
+import delivery_pb2_grpc
 
-class OrderService:
-    def __init__(self, repository: OrderRepository):
-        self.repository = repository
 
-    def create_order(self, customer_id: int, item_id: int, quantity: int) -> Order:
-        # ... создание заказа ...
-        order = self.repository.save_order(customer_id, item_id, quantity, total)
+class DeliveryGrpcClient:
+    def __init__(self, host: str = "localhost", port: int = 50051):
+        # Создаём канал. insecure_channel — для локальной разработки без TLS.
+        self.channel = grpc.insecure_channel(f"{host}:{port}")
+        self.stub = delivery_pb2_grpc.DeliveryServiceStub(self.channel)
 
-        # Вызов фоновых задач через .delay()
-        # .delay() ставит задачу в очередь и сразу возвращает управление.
-        generate_order_pdf.delay(order.id)
-        send_order_email.delay(order.id, order.customer.email)
-        send_order_sms.delay(order.id, order.customer.phone)
+    def assign_courier(self, order_id: int, courier_id: int) -> dict:
+        try:
+            request = delivery_pb2.AssignCourierRequest(
+                order_id=order_id, courier_id=courier_id
+            )
+            # Таймаут 5 секунд, чтобы не ждать вечно, если сервис упал.
+            response = self.stub.AssignCourier(request, timeout=5)
+            return {"delivery_id": response.delivery_id, "status": response.status}
+        except grpc.RpcError as e:
+            self._handle_error(e)
 
-        return order
+    def complete_delivery(self, delivery_id: int) -> dict:
+        try:
+            request = delivery_pb2.CompleteDeliveryRequest(delivery_id=delivery_id)
+            response = self.stub.CompleteDelivery(request, timeout=5)
+            return {"status": response.status}
+        except grpc.RpcError as e:
+            self._handle_error(e)
+
+    def get_delivery(self, order_id: int) -> dict:
+        try:
+            request = delivery_pb2.GetDeliveryRequest(order_id=order_id)
+            response = self.stub.GetDelivery(request, timeout=5)
+            return {
+                "id": response.id,
+                "status": response.status,
+                "courier_id": response.courier_id
+            }
+        except grpc.RpcError as e:
+            self._handle_error(e)
+
+    def _handle_error(self, e: grpc.RpcError):
+        """Обработка сетевых ошибок gRPC."""
+        if e.code() == grpc.StatusCode.NOT_FOUND:
+            raise ValueError("Object not found")
+        if e.code() == grpc.StatusCode.UNAVAILABLE:
+            raise ConnectionError("Delivery service is unavailable")
+        if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            raise TimeoutError("Delivery service timeout")
+        raise RuntimeError(f"gRPC error: {e.details()}")
 ```
 
-Важно: `service.py` по-прежнему не импортирует fastapi и sqlalchemy. Он вызывает задачи Celery, но это допустимо — это часть бизнес-логики: «после заказа отправить уведомление».
 
-#### Шаг 5. Запуск воркера (10 минут)
+### Этап 5. Замена логики в монолите
 
-Что делаем: запускаем процесс, который будет выполнять задачи.  
-Зачем: без воркера задачи будут лежать в очереди и не выполняться.
+Что делаем: в OrderService или DeliveryService монолита заменяем прямые вызовы к БД на вызовы DeliveryGrpcClient.
+Зачем: монолит должен перестать работать с таблицей deliveries напрямую.
+Откройте app/modules/delivery/router.py (или service.py, в зависимости от вашей структуры). Замените вызовы DeliveryRepository на DeliveryGrpcClient:
 
-Откройте новый терминал (воркер должен работать параллельно с FastAPI):
+```python
+# Пример для router.py
+from app.modules.delivery.grpc_client import DeliveryGrpcClient
+
+@router.post("/assign")
+def assign_courier(payload: DeliveryAssign):
+    client = DeliveryGrpcClient()
+    try:
+        result = client.assign_courier(payload.order_id, payload.courier_id)
+        return {"status": "success", **result}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except ConnectionError as e:
+        raise HTTPException(503, str(e))
+```
+
+
+### Этап 6. Запуск и проверка
+
+Что делаем: запускаем два процесса параллельно.
+Терминал 1 (gRPC-сервер):
 
 ```bash
-cd ~/projects/sirius_food
 source .venv/bin/activate
-celery -A app.core.celery_app worker --loglevel=info
+python delivery_server.py
 ```
 
-Что увидите: воркер подключится к Redis и начнёт слушать очередь. При поступлении задачи он выполнит её.
-
-#### Шаг 6. Повторные замеры (10 минут)
-
-Что делаем: снова замеряем время ответа `POST /orders/create`.  
-Зачем: доказать, что API отвечает мгновенно.
-
-1. Убедитесь, что FastAPI и Celery-воркер запущены.
-2. Выполните запрос с замером:
+Ожидаемый вывод: Delivery gRPC Server running on port 50051.
+Терминал 2 (Монолит):
 
 ```bash
-time curl -X POST "http://127.0.0.1:8000/orders/create" -H "Authorization: Bearer YOUR_TOKEN" -H "Content-Type: application/json" -d '{"item_id": 1, "quantity": 2}'
+source .venv/bin/activate
+uvicorn app.main:app --reload
 ```
 
-Ожидаемый результат: время ответа около 50–100 миллисекунд.
+Проверка в Swagger: выполните запрос POST /delivery/assign. Убедитесь, что заказ создан, а в логах gRPC-сервера появилась запись об обработке запроса.
 
-Проверьте логи воркера: он должен показать выполнение трёх задач (`generate_order_pdf`, `send_order_email`, `send_order_sms`).
 
-#### Шаг 7. Ретраи с экспоненциальной задержкой (15 минут)
+## 4. Задание для самостоятельной работы (9–10 баллов)
 
-Что делаем: настраиваем повторный запуск задачи при падении.  
-Зачем: если внешний сервис временно недоступен — задача должна повториться через 1, 2, 4 секунды, а не мгновенно.
-
-Обновите задачи в `app/tasks/orders.py`:
-
-```python
-@celery_app.task(
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_backoff_max=600,
-    retry_jitter=True,
-    max_retries=3,
-)
-def send_order_email(order_id: int, email: str) -> str:
-    """Отправка email с ретраями."""
-    time.sleep(1)
-    # Имитация падения для каждого 5-го заказа
-    if order_id % 5 == 0:
-        raise Exception("Email service unavailable")
-    return f"Email sent to {email} for order {order_id}"
-```
-
-Что это значит:
-
-- `autoretry_for` — при каком исключении повторять.
-- `retry_backoff` — экспоненциальная задержка.
-- `max_retries` — не более 3 попыток.
-
-Как проверить на сдаче: создайте заказ с `order_id`, кратным 5. В логах воркера будет видно, как задача падает и повторяется с задержкой 1с, 2с, 4с.
-
-#### Шаг 8. Идемпотентность (10 минут)
-
-Что делаем: защищаем задачу от повторного выполнения.  
-Зачем: если задача упала и ретрай выполнился дважды, мы не хотим создавать дубль чека или отправлять два email.
-
-Обновите задачу `generate_order_pdf` с проверкой через Redis:
-
-```python
-from app.core.redis import redis_client
-
-@celery_app.task(bind=True)
-def generate_order_pdf(self, order_id: int) -> str:
-    """Генерация PDF с проверкой идемпотентности."""
-    # Ключ идемпотентности
-    key = f"pdf_generated:{order_id}"
-
-    # Если ключ уже есть — PDF уже сгенерирован, пропускаем
-    if redis_client.exists(key):
-        return f"PDF already generated for order {order_id}"
-
-    time.sleep(2)
-
-    # Сохраняем флаг на 1 час
-    redis_client.setex(key, 3600, "1")
-
-    return f"PDF generated for order {order_id}"
-```
-
-Как проверить на сдаче: выполните один и тот же заказ дважды (или вызовите задачу вручную). Второй вызов не должен генерировать PDF заново. В логах воркера будет видно, что задача пропущена.
-
-#### Шаг 9. Dead Letter Queue (DLQ) (10 минут)
-
-Что делаем: настраиваем очередь для задач, которые так и не выполнились после всех ретраев.  
-Зачем: чтобы не терять «битые» задачи и иметь возможность разобрать их вручную.
-
-В `app/core/celery_app.py` добавьте:
-
-```python
-from kombu import Queue, Exchange
-
-celery_app.conf.task_queues = (
-    Queue("default", Exchange("default"), routing_key="default"),
-    Queue("dlq", Exchange("dlq"), routing_key="dlq"),
-)
-
-celery_app.conf.task_default_queue = "default"
-celery_app.conf.task_default_exchange = "default"
-celery_app.conf.task_default_routing_key = "default"
-```
-
-Как проверить на сдаче: создайте заказ с `order_id`, кратным 5. После 3 неудачных попыток задача будет помечена как failed. В логах воркера будет видно сообщение о превышении `max_retries`. Для просмотра очереди DLQ используйте `redis-cli -n 0 lrange dlq 0 -1`.
-
-### 4. Задание для самостоятельной работы
-
-Вам необходимо доработать систему фоновых задач:
-
-1. Мониторинг через Flower (9 баллов).
-   - Запустите Flower: `celery -A app.core.celery_app flower`.
-   - Откройте http://localhost:5555, убедитесь, что задачи видны в реальном времени.
-   - Сделайте скриншоты для `README.md`.
-2. Celery Beat (10 баллов).
-   - Настройте периодическую задачу, которая выполняется раз в минуту. Например:
-     - Очистка старых записей в таблице `task_logs` (удаление записей старше 30 дней).
-     - Обновление статистики — подсчёт количества заказов за день и запись в отдельную таблицу (или в Redis).
-   - Используйте `celery_app.conf.beat_schedule`.
-3. Оформите отчет.
-   - Подготовьте `README.md` со сравнительной таблицей «До / После» (время ответа API).
-   - Приложите скриншоты из Flower.
-
+Вам необходимо доработать систему, выбрав одно из заданий:
+Вариант А (9 баллов). Server Streaming для трекинга доставки.
+Добавьте в .proto метод TrackDelivery(TrackDeliveryRequest) returns (stream DeliveryStatus).
+Сгенерируйте код.
+На сервере реализуйте метод, который отправляет статусы (in_progress → on_the_way → delivered) с задержкой в 2 секунды.
+На клиенте (в монолите) напишите скрипт, который подписывается на этот поток и выводит статусы в консоль.
+Вариант Б (10 баллов). Bidirectional Streaming для чата.
+Добавьте в .proto метод ChatWithCourier(stream ChatMessage) returns (stream ChatMessage).
+Реализуйте сервер, который принимает сообщения от клиента и отправляет ответы в реальном времени.
+Напишите клиент, который отправляет сообщение и ждет ответа.
 Задание сдаётся в виде:
+двух запущенных процессов (демонстрация);
+README.md с архитектурной схемой (монолит + gRPC-сервис);
+устной защиты.
 
-- очной демонстрации на вашем ноутбуке;
-- файла `README.md` с графиками и скриншотами;
-- устной защиты.
+## 5. Контрольные вопросы для защиты работы
 
-### 5. Контрольные вопросы для защиты работы
+Зачем выносить модуль delivery в отдельный сервис? Какие проблемы это решает?
+Почему для межсервисного общения выбран gRPC, а не REST?
+Что произойдёт, если gRPC-сервис недоступен? Как обработать эту ошибку?
+Почему в идеальном микросервисе у delivery должна быть своя БД? Какие проблемы возникают при использовании общей БД?
+Чем Server Streaming отличается от Unary? Приведите пример.
+Что такое паттерн Strangler Fig и как он связан с выносом delivery?
+Какую роль играет DeliveryGrpcClient в архитектуре монолита? Почему он находится в инфраструктурном слое?
 
-1. Почему вызов фоновых задач реализован в слое Service, а не в Router? Как это связано с Clean Architecture?
-2. Что произойдёт, если Celery-воркер отключится во время выполнения задачи?
-3. Что такое идемпотентность и почему она важна для фоновых задач?
-4. Зачем нужны ретраи с экспоненциальной задержкой?
-5. Что такое Dead Letter Queue и как её использовать?
-6. Почему Celery — стандарт индустрии, а не просто threading или asyncio?
-7. Чем Celery Beat отличается от обычной задачи?
+## 6. Приложение: Структура проекта после внедрения
 
-### 6. Приложение: Структура проекта после внедрения
 
 ```text
-app/
-├── core/
-│   ├── celery_app.py     # Настройка Celery
-│   ├── redis.py          # Клиент Redis
+sirius_food/
+├── app/
+│   ├── modules/
+│   │   └── delivery/
+│   │       ├── grpc_client.py    # gRPC-клиент (инфраструктура)
+│   │       ├── router.py         # HTTP-эндпоинты (транспорт)
+│   │       └── ...
+│   ├── main.py
 │   └── ...
-├── tasks/                # Фоновые задачи
-│   ├── __init__.py
-│   └── orders.py         # generate_order_pdf, send_order_email, send_order_sms
-├── modules/
-│   └── orders/
-│       ├── router.py     # Без изменений
-│       ├── service.py    # Добавлены вызовы задач через .delay()
-│       ├── repository.py
-│       └── exceptions.py
+├── proto/
+│   └── delivery.proto            # Контракт
+├── delivery_pb2.py               # Сгенерированные сообщения
+├── delivery_pb2_grpc.py          # Сгенерированные Stub и Servicer
+├── delivery_server.py            # gRPC-сервер (микросервис)
+├── docker-compose.yml
+└── requirements.txt
 ```
-
-Ключевой результат: `service.py` не импортирует FastAPI и SQLAlchemy. Он вызывает задачи Celery, но бизнес-логика остаётся чистой.

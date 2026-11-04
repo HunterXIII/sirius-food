@@ -12,7 +12,7 @@
 - на 9 баллов: защита от cache stampede;
 - на 10 баллов: категории меню в кеше с другим TTL или прогрев кеша при старте. Сделал и то, и другое.
 
-Полный текст задания lab4 - в коммите с тегом `lab4` (`git show lab4:task.md`), в `task.md` сейчас лежит задание lab5. Задание и README прошлых работ - в коммитах с тегами: `git show lab3:README.md`, `git show lab2:README.md`.
+Полный текст задания lab4 - в коммите с тегом `lab4` (`git show lab4:task.md`), задание lab5 лежит в `task-lab5.md`. Задание и README прошлых работ - в коммитах с тегами: `git show lab3:README.md`, `git show lab2:README.md`.
 
 ## Что сделано
 
