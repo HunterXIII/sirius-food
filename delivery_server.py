@@ -68,7 +68,7 @@ class DeliveryServicer(rpc.DeliveryServiceServicer):
         # Учебный поток статусов не изменяет запись в базе.
         yield pb.DeliveryStatus(status="in_progress")
         for status in ("on_the_way", "delivered"):
-            sleep(2)
+            sleep(5)
             if not context.is_active():
                 return
             yield pb.DeliveryStatus(status=status)

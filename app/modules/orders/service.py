@@ -38,7 +38,7 @@ class OrderService:
 
         # Списываем деньги и сохраняем заказ. Как именно - решает репозиторий.
         self.repository.update_user_balance(user, user.balance - total_cost)
-        order_id = self.repository.save_order(user_id, item_id, quantity, status="processing")
+        order_id = self.repository.save_order(user_id, item_id, quantity, status="paid")
 
         # Тяжёлые операции - в фоне. .delay() только кладёт задачу в очередь (Redis)
         # и сразу возвращает управление, выполнит задачу воркер Celery.
@@ -55,8 +55,11 @@ class OrderService:
         return self.repository.count_orders_by_day(day)
 
     def get_kitchen_orders(self) -> list:
-        """Заказы, которые кухне нужно приготовить (статус processing)."""
-        return self.repository.get_orders_by_status("processing")
+        """Оплаченные заказы и старые заказы со статусом processing."""
+        return (
+            self.repository.get_orders_by_status("paid")
+            + self.repository.get_orders_by_status("processing")
+        )
 
     def cancel_order(self, order_id: int, current_user):
         """

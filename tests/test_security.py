@@ -140,7 +140,7 @@ class SecurityTest(unittest.TestCase):
         response = client.post("/orders/1/cancel", headers=auth("petr@sirius.ru"))
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(memory_db.orders[1].status, "processing")
+        self.assertEqual(memory_db.orders[1].status, "paid")
 
     def test_topup_foreign_balance_403(self):
         response = client.post("/users/1/topup?amount=100", headers=auth("petr@sirius.ru"))

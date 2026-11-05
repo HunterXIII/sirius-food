@@ -2,13 +2,13 @@
 Транспортный слой модуля доставки.
 Сборка слоёв, вызов сервиса и перевод исключений в HTTP-статусы.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 import grpc
 from app.core.dependencies import get_current_user, require_role
 from app.core.config import settings
 from app.exceptions import NotFoundError, ForbiddenError, AccessDeniedError
 from app.schemas import DeliveryAssign, DeliveryResponse
-from app.modules.delivery.grpc_client import DeliveryGrpcClient
+from app.modules.delivery.grpc_client import DeliveryGrpcClient, log_delivery_statuses
 from app.modules.delivery.repository import InMemoryDeliveryRepository
 from app.modules.delivery.service import DeliveryService
 
@@ -28,6 +28,7 @@ def get_delivery_service():
 @router.post("/assign")
 def assign_courier(
     payload: DeliveryAssign,
+    background_tasks: BackgroundTasks,
     # Курьера на заказ назначает администратор.
     current_user=Depends(require_role("admin")),
     service: DeliveryGrpcClient | DeliveryService = Depends(get_delivery_service),
@@ -47,6 +48,9 @@ def assign_courier(
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if settings.REPOSITORY != "memory":
+        background_tasks.add_task(log_delivery_statuses, delivery_id, payload.courier_id)
 
     return {"status": "success", "delivery_id": delivery_id}
 
