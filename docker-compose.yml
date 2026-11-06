@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:15
@@ -17,5 +15,19 @@ services:
     ports:
       - "6379:6379"
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: sirius_rabbitmq
+    hostname: sirius-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: sirius
+      RABBITMQ_DEFAULT_PASS: sirius
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
 volumes:
   pg_data:
+  rabbitmq_data:

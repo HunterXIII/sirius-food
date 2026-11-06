@@ -1,429 +1,546 @@
-# Практическая работа № 6
-Удушение монолита: вынос модуля delivery в gRPC-микросервис
+# Практическая работа № 7
+
+## Event-driven архитектура: RabbitMQ, Saga и Dead Letter Queue
+
 Дисциплина: Разработка программных модулей и приложений для серверов
-Тема: Межсервисное взаимодействие на базе gRPC и паттерн Strangler Fig
+Тема: Асинхронное взаимодействие через брокер сообщений, идемпотентность, DLQ
 Продолжительность: 2 академических часа (90 минут) + самостоятельная работа
 Проект: сквозной пет-проект «Сириус.Еда»
 Операционная система: Ubuntu 22.04 LTS или новее
 
-
 ## Цели работы
 
 В ходе выполнения лабораторной работы вы:
-Освоите принципы межсервисного взаимодействия на базе бинарного протокола gRPC.
-Научитесь описывать контракты с помощью Protocol Buffers (.proto).
-Реализуете отдельный gRPC-микросервис, вынеся бизнес-логику модуля delivery из монолита.
-Интегрируете gRPC-клиент в монолит, заменив прямые вызовы к базе данных на сетевые вызовы.
-Примените паттерн Strangler Fig для постепенного отказа от монолитной архитектуры.
-Обеспечите отказоустойчивость: научитесь обрабатывать сетевые ошибки и таймауты.
+
+- Освоите RabbitMQ как брокер сообщений для асинхронного взаимодействия между компонентами.
+
+- Реализуете публикацию события OrderPaid из сервиса заказов при оплате.
+
+- Напишете consumer'ов для кухни и сервиса доставки, которые реагируют на событие независимо друг от друга.
+
+- Обеспечите идемпотентность consumer'ов, чтобы повторная доставка сообщения не создавала дублей.
+
+- Настроите Dead Letter Queue (DLQ) для «битых» сообщений.
+
 Дополнительно (для 9–10 баллов):
-Реализуете Server Streaming для трекинга доставки в реальном времени.
-Реализуете Bidirectional Streaming для чата между клиентом и курьером.
 
+- Реализуете Saga (хореография) — при неудачном назначении курьера деньги возвращаются клиенту, заказ отменяется.
 
+- Реализуете Transactional Outbox — гарантия, что событие не потеряется, даже если RabbitMQ недоступен в момент оплаты.
 
 ## Критерии оценивания (10-балльная шкала)
 
-Баллы
-Оценка
-Что нужно сделать
-0–3
-Неудовлетворительно (2)
-.proto не создан или содержит ошибки. gRPC-сервер не запускается. Интеграция с монолитом не выполнена.
-4–5
-Удовлетворительно (3)
-.proto создан, код сгенерирован. Однако gRPC-сервер не отвечает на запросы, или монолит не может к нему подключиться.
-6–7
-Хорошо (4)
-gRPC-сервер работает. Монолит успешно вызывает методы gRPC-сервиса. Два процесса запущены параллельно и корректно взаимодействуют.
-8
-Отлично (5)
-Все требования уровня 6–7 выполнены. Дополнительно: реализована обработка сетевых ошибок (UNAVAILABLE, таймауты). Оформлен README.md с архитектурной схемой. Устная защита демонстрирует понимание.
-9
-Отлично с плюсом (5+)
-Все требования уровня 8 выполнены. Дополнительно: реализован Server Streaming (метод TrackDelivery, транслирующий статусы доставки).
-10
-Отлично с двойным плюсом (5++)
-Все требования уровня 9 выполнены. Дополнительно реализовано: Bidirectional Streaming (чат с курьером).
 
+| Баллы | Оценка | Что нужно сделать |
+| --- | --- | --- |
+| 0–3 | Неудовлетворительно (2) | RabbitMQ не поднят, событие не публикуется, consumer'ы не работают. |
+| 4–5 | Удовлетворительно (3) | RabbitMQ работает, событие публикуется, но consumer'ы не подписаны или получают не те сообщения. |
+| 6–7 | Хорошо (4) | Событие  OrderPaid  публикуется, кухня и доставка получают его независимо. Проект работает end-to-end. |
+| 8 | Отлично (5) | Всё из 6–7 + идемпотентность consumer'ов (повторная доставка не создаёт дублей) + DLQ настроена.  README.md  с архитектурной схемой. Устная защита. |
+| 9 | Отлично с плюсом (5+) | Всё из 8 + Saga (хореография): при провале назначения курьера выполняется компенсация (возврат денег, отмена заказа). |
+| 10 | Отлично с двойным плюсом (5++) | Всё из 9 + Transactional Outbox (событие не теряется при недоступности брокера), либо интеграционные тесты для consumer'ов, либо защита второго события ( OrderDelivered ). |
 
 ## 1. Пререквизиты
 
 Для выполнения работы вам потребуется:
-Ubuntu 22.04 LTS;
-Python 3.11 или новее;
-Docker Engine и Docker Compose (запущены db и redis);
-Git;
-выполненные лабораторные работы № 2–5 (монолит отрефакторен, внедрены безопасность, кеш и фоновые задачи).
-Установка дополнительных зависимостей
-Нам понадобятся библиотеки для работы с gRPC:
-grpcio — runtime-библиотека, обеспечивающая сетевую передачу по HTTP/2.
-grpcio-tools — компилятор, который генерирует Python-код (Stub и Message-классы) из .proto-файла.
+
+- Ubuntu 22.04 LTS;
+
+- Python 3.11 или новее;
+
+- Docker Engine и Docker Compose;
+
+- Git;
+
+- выполненные лабораторные работы № 2–6 (монолит отрефакторен, внедрены безопасность, кеш, фоновые задачи, gRPC, вынесен delivery в gRPC-сервис).
+
+### Установка дополнительных зависимостей
+
+Нам понадобится библиотека для работы с RabbitMQ из Python:
+
+- aio-pika — асинхронный клиент RabbitMQ. Хорошо ложится на FastAPI.
+
 
 ```bash
 source .venv/bin/activate
-pip install grpcio grpcio-tools
+pip install aio-pika
 ```
 
-Запуск инфраструктуры
-Убедимся, что PostgreSQL и Redis запущены:
+### Запуск инфраструктуры
+
+Добавьте RabbitMQ в docker-compose.yml:
+
+
+```yaml
+services:
+  # ... существующие сервисы db, redis ...
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: sirius_rabbitmq
+    ports:
+      - "5672:5672"      # AMQP-протокол
+      - "15672:15672"    # Веб-интерфейс (Management UI)
+    environment:
+      RABBITMQ_DEFAULT_USER: sirius
+      RABBITMQ_DEFAULT_PASS: sirius
+```
+
+Запустите:
+
 
 ```bash
-docker compose up -d db redis
+docker compose up -d db redis rabbitmq
 ```
 
-
+Проверка: откройте http://localhost:15672 в браузере. Логин: sirius, пароль: sirius. Вы увидите веб-интерфейс RabbitMQ.
 
 ## 2. Теоретическое введение
 
-2.1. Паттерн Strangler Fig (Душитель)
-Паттерн подразумевает постепенную замену частей монолитной системы на микросервисы. Вы не переписываете всё приложение сразу. Вместо этого вы «вырезаете» один модуль (в нашем случае delivery), разворачиваете его как отдельный сервис и перенаправляете вызовы к нему. Монолит при этом продолжает работать, но становится «худее».
-2.2. Архитектура gRPC
-В gRPC взаимодействие строится на трёх компонентах:
-Контракт (.proto) — строгое описание методов и типов данных.
-Сервер — класс, наследующий сгенерированный Servicer, содержащий бизнес-логику.
-Клиент (Stub) — сгенерированный класс, который позволяет вызывать методы сервера так, как будто они находятся локально.
-2.3. Ключевой архитектурный принцип
-В Clean Architecture gRPC-клиент должен находиться в инфраструктурном слое. Бизнес-логика (Service) не должна знать, что данные пришли по сети. Она должна работать с абстракцией (интерфейсом), как мы делали это с Repository.
+### 2.1. Зачем нужен брокер сообщений
 
+Сейчас при оплате заказа OrderService синхронно вызывает другие сервисы (кухню, доставку). Если один из них упал — заказ не может быть обработан. Если завтра нужно добавить ещё одного потребителя — придётся менять код OrderService.
 
+Event-Driven Architecture решает это: OrderService публикует событие OrderPaid в брокер и забывает. Кухня, доставка и бонусная система сами подписываются на это событие. Они не знают друг о друге, и OrderService не знает о них.
 
-## 3. Практическая часть
+### 2.2. RabbitMQ: Exchange и Queue
 
+В RabbitMQ есть два ключевых понятия:
 
-### Этап 1. Создание gRPC-контракта
+- Exchange — «сортировочный центр». Publisher отправляет сообщение в Exchange с ключом (routing_key).
 
-Что делаем: создаём файл delivery.proto, в котором описываем методы, которые монолит будет вызывать у нового микросервиса.
-Зачем: .proto-файл — это единый источник правды. Он гарантирует, что клиент и сервер говорят на одном языке.
-Создайте в корне проекта папку proto и файл proto/delivery.proto:
+- Queue — очередь, в которой хранятся сообщения. Consumer читает из неё.
 
-```protobuf
-syntax = "proto3";
+Exchange связан с очередями через Bindings (правила маршрутизации). По умолчанию используется fanout (всем) или topic (по паттерну ключа).
 
-// Пакет для генерации Python-кода.
-package delivery;
+Для «Сириус.Еды»: используем topic exchange, чтобы разные события (order.paid, order.cancelled) попадали в разные очереди.
 
-// Описание сервиса доставки.
-service DeliveryService {
-  // Назначение курьера на заказ.
-  rpc AssignCourier(AssignCourierRequest) returns (AssignCourierResponse);
+### 2.3. Идемпотентность в EDA
 
-  // Завершение доставки.
-  rpc CompleteDelivery(CompleteDeliveryRequest) returns (CompleteDeliveryResponse);
+RabbitMQ использует гарантию At-Least-Once (доставит как минимум один раз). Это значит, что сообщение может прийти дважды. Если consumer не идемпотентен — при повторной доставке он создаст дубль (например, дважды начислит бонусы).
 
-  // Получение информации о доставке.
-  rpc GetDelivery(GetDeliveryRequest) returns (GetDeliveryResponse);
-}
+Решение: хранить event_id в таблице processed_events. Перед обработкой проверять: если event_id уже есть — пропустить.
 
-// --- Сообщения для AssignCourier ---
-message AssignCourierRequest {
-  int32 order_id = 1;
-  int32 courier_id = 2;
-}
+### 2.4. Dead Letter Queue
 
-message AssignCourierResponse {
-  int32 delivery_id = 1;
-  string status = 2;
-}
+Если consumer падает при обработке сообщения (например, невалидный JSON) — сообщение возвращается в очередь и снова падает. Это poison message. Очередь блокируется.
 
-// --- Сообщения для CompleteDelivery ---
-message CompleteDeliveryRequest {
-  int32 delivery_id = 1;
-}
+DLQ — отдельная очередь для сообщений, которые не удалось обработать после N попыток. Настраивается через x-dead-letter-exchange при объявлении очереди.
 
-message CompleteDeliveryResponse {
-  string status = 1;
-}
+## 3. Пошаговый разбор
 
-// --- Сообщения для GetDelivery ---
-message GetDeliveryRequest {
-  int32 order_id = 1;
-}
+### Шаг 1. Настройка подключения к RabbitMQ
 
-message GetDeliveryResponse {
-  int32 id = 1;
-  string status = 2;
-  int32 courier_id = 3;
-}
-```
+Что делаем: создаём инфраструктурный модуль для подключения к RabbitMQ.
 
+Зачем: приложению нужен единый интерфейс для публикации сообщений.
 
-### Этап 2. Генерация Python-кода
+Создайте app/core/rabbitmq.py:
 
-Что делаем: запускаем компилятор protoc, который сгенерирует два Python-файла на основе нашего контракта.
-Зачем: писать сериализацию Protobuf и сетевую обвязку вручную — долго и чревато ошибками. Компилятор делает это автоматически.
-Выполните в терминале:
-
-```bash
-python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/delivery.proto
-```
-
-Что произошло: в корне проекта появились файлы delivery_pb2.py (классы сообщений) и delivery_pb2_grpc.py (серверные и клиентские заглушки).
-
-
-### Этап 3. Реализация gRPC-сервера
-
-Что делаем: создаём отдельный процесс-сервер, который будет обслуживать вызовы от монолита.
-Зачем: это и есть наш новый микросервис. Он содержит бизнес-логику доставки.
-Создайте файл delivery_server.py в корне проекта (рядом с app):
 
 ```python
 """
-Микросервис доставки. Работает как отдельный процесс.
-Слушает порт 50051 и обслуживает gRPC-вызовы от монолита.
+Инфраструктурный модуль для работы с RabbitMQ.
+Обеспечивает подключение и публикацию сообщений в exchange.
 """
-import grpc
-from concurrent import futures
-import time
+import aio_pika
+from aio_pika import ExchangeType
+from app.core.config import settings
 
-# Импорт сгенерированных классов.
-import delivery_pb2
-import delivery_pb2_grpc
+# Единый exchange для всех событий проекта.
+EXCHANGE_NAME = "sirius_events"
 
-# Импорт инфраструктуры монолита для работы с БД.
-# В реальном проекте у микросервиса была бы своя БД и модели.
+
+async def get_connection() -> aio_pika.RobustConnection:
+    """Создаёт подключение к RabbitMQ. Robust — автоматически переподключается."""
+    return await aio_pika.connect_robust(settings.RABBITMQ_URL)
+
+
+async def publish_event(routing_key: str, payload: dict) -> None:
+    """
+    Публикует событие в RabbitMQ.
+    routing_key — например, 'order.paid'.
+    payload — словарь с данными события.
+    """
+    import json
+    connection = await get_connection()
+    async with connection:
+        channel = await connection.channel()
+        exchange = await channel.declare_exchange(
+            EXCHANGE_NAME,
+            ExchangeType.TOPIC,
+            durable=True,  # exchange переживёт перезапуск RabbitMQ
+        )
+        message = aio_pika.Message(
+            body=json.dumps(payload).encode(),
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,  # сообщение пишется на диск
+        )
+        await exchange.publish(message, routing_key=routing_key)
+```
+
+Добавьте в app/core/config.py:
+
+
+```python
+class Settings(BaseSettings):
+    # ... существующие поля ...
+    RABBITMQ_URL: str = "amqp://sirius:sirius@localhost:5672/"
+```
+
+Проверка: модуль импортируется без ошибок.
+
+### Шаг 2. Публикация события при оплате заказа
+
+Что делаем: при оплате заказа (или создании) публикуем событие OrderPaid.
+
+Зачем: другие сервисы должны узнать, что заказ оплачен.
+
+В OrderService (там, где обрабатывается оплата заказа) добавьте публикацию события:
+
+
+```python
+from app.core.rabbitmq import publish_event
+
+class OrderService:
+    # ... существующий код ...
+
+    async def pay_order(self, order_id: int, current_user: User) -> Order:
+        """
+        Оплата заказа. После успешной оплаты публикуем событие OrderPaid.
+        """
+        order = self.repository.get_order(order_id)
+        if not order:
+            raise OrderNotFoundError()
+        if order.customer_id != current_user.id:
+            raise AccessDeniedError()
+
+        order.pay()  # меняем статус на 'paid'
+        self.repository.save(order)
+
+        # Публикуем событие. Кто его получит — не наша забота.
+        await publish_event(
+            routing_key="order.paid",
+            payload={
+                "event_id": str(uuid.uuid4()),  # ключ для идемпотентности
+                "order_id": order.id,
+                "customer_id": order.customer_id,
+                "amount": order.total,
+            },
+        )
+
+        return order
+```
+
+Проверка: после вызова pay_order в RabbitMQ появится сообщение в exchange sirius_events с ключом order.paid.
+
+### Шаг 3. Consumer для кухни
+
+Что делаем: создаём сервис, который слушает событие order.paid и «готовит» заказ.
+
+Зачем: кухня должна узнавать о новых оплаченных заказах.
+
+Создайте app/workers/kitchen_consumer.py (папку app/workers/ создайте, если её нет):
+
+
+```python
+"""
+Consumer для кухни. Слушает событие order.paid и регистрирует заказ в очереди кухни.
+"""
+import asyncio
+import json
+import aio_pika
+from aio_pika import ExchangeType
+
+from app.core.config import settings
 from app.database import SessionLocal
-from app.models import Delivery, Order
+from app.models import KitchenOrder, ProcessedEvent
+
+EXCHANGE_NAME = "sirius_events"
+QUEUE_NAME = "kitchen_queue"
 
 
-class DeliveryServiceServicer(delivery_pb2_grpc.DeliveryServiceServicer):
+async def process_message(message: aio_pika.IncomingMessage) -> None:
     """
-    Реализация бизнес-логики модуля доставки.
+    Обрабатывает одно сообщение.
+    Проверяет идемпотентность, затем создаёт запись для кухни.
     """
+    async with message.process():
+        payload = json.loads(message.body)
+        event_id = payload["event_id"]
+        order_id = payload["order_id"]
 
-    def AssignCourier(self, request, context):
-        """Назначение курьера на заказ."""
         db = SessionLocal()
         try:
-            # Проверка, что заказ существует.
-            order = db.query(Order).filter(Order.id == request.order_id).first()
-            if not order:
-                context.abort(grpc.StatusCode.NOT_FOUND, "Order not found")
+            # Идемпотентность: если событие уже обработано — пропускаем.
+            exists = db.query(ProcessedEvent).filter_by(id=event_id).first()
+            if exists:
+                return
 
-            # Создание доставки.
-            delivery = Delivery(
-                order_id=request.order_id,
-                courier_id=request.courier_id,
-                status="in_progress"
-            )
-            db.add(delivery)
+            # Создаём запись для кухни.
+            db.add(KitchenOrder(order_id=order_id, status="pending"))
+            db.add(ProcessedEvent(id=event_id))
             db.commit()
-            db.refresh(delivery)
-
-            return delivery_pb2.AssignCourierResponse(
-                delivery_id=delivery.id,
-                status=delivery.status
-            )
-        finally:
-            db.close()
-
-    def CompleteDelivery(self, request, context):
-        """Завершение доставки."""
-        db = SessionLocal()
-        try:
-            delivery = db.query(Delivery).filter(Delivery.id == request.delivery_id).first()
-            if not delivery:
-                context.abort(grpc.StatusCode.NOT_FOUND, "Delivery not found")
-
-            delivery.status = "completed"
-            db.commit()
-
-            return delivery_pb2.CompleteDeliveryResponse(status=delivery.status)
-        finally:
-            db.close()
-
-    def GetDelivery(self, request, context):
-        """Получение информации о доставке по ID заказа."""
-        db = SessionLocal()
-        try:
-            delivery = db.query(Delivery).filter(Delivery.order_id == request.order_id).first()
-            if not delivery:
-                context.abort(grpc.StatusCode.NOT_FOUND, "Delivery not found")
-
-            return delivery_pb2.GetDeliveryResponse(
-                id=delivery.id,
-                status=delivery.status,
-                courier_id=delivery.courier_id
-            )
+            print(f"[Kitchen] Принят заказ {order_id}")
         finally:
             db.close()
 
 
-def serve():
-    """Запуск gRPC-сервера."""
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    delivery_pb2_grpc.add_DeliveryServiceServicer_to_server(
-        DeliveryServiceServicer(), server
+async def main() -> None:
+    """Запускает consumer и слушает очередь кухни."""
+    connection = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+    channel = await connection.channel()
+    await channel.set_qos(prefetch_count=10)  # не берём больше 10 сообщений одновременно
+
+    exchange = await channel.declare_exchange(
+        EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
     )
-    server.add_insecure_port('[::]:50051')
-    server.start()
-    print("Delivery gRPC Server running on port 50051")
-    try:
-        while True:
-            time.sleep(86400)
-    except KeyboardInterrupt:
-        server.stop(0)
+
+    # Очередь с настройкой DLQ.
+    queue = await channel.declare_queue(
+        QUEUE_NAME,
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": "dlx_exchange",
+            "x-dead-letter-routing-key": "kitchen.dlq",
+        },
+    )
+
+    # Привязываем очередь к exchange с ключом order.paid.
+    await queue.bind(exchange, routing_key="order.paid")
+
+    await queue.consume(process_message)
+    print("[Kitchen] Ждём события order.paid...")
+
+    await asyncio.Future()  # бесконечное ожидание
 
 
-if __name__ == '__main__':
-    serve()
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
+Проверка: запустите python -m app.workers.kitchen_consumer в отдельном терминале. После оплаты заказа в логах появится [Kitchen] Принят заказ 42.
 
-### Этап 4. Интеграция клиента в монолит
+### Шаг 4. Consumer для доставки
 
-Что делаем: создаём класс-клиент в монолите, который будет общаться с gRPC-сервером.
-Зачем: бизнес-логика монолита (Service) не должна знать про сеть. Мы создаём адаптер (как Repository), который скрывает gRPC.
-Создайте файл app/modules/delivery/grpc_client.py:
+Что делаем: создаём consumer для delivery-микросервиса (того, что вынесли в ЛР № 6).
+
+Зачем: отдельный сервис доставки должен независимо реагировать на OrderPaid.
+
+Создайте delivery_worker.py в корне проекта (рядом с delivery_server.py):
+
 
 ```python
 """
-gRPC-клиент для общения с микросервисом доставки.
-Является адаптером между бизнес-логикой монолита и сетью.
+Consumer для микросервиса доставки. Слушает событие order.paid
+и подготавливает доставку.
 """
-import grpc
-import delivery_pb2
-import delivery_pb2_grpc
+import asyncio
+import json
+import aio_pika
+from aio_pika import ExchangeType
+
+EXCHANGE_NAME = "sirius_events"
+QUEUE_NAME = "delivery_queue"
+RABBITMQ_URL = "amqp://sirius:sirius@localhost:5672/"
 
 
-class DeliveryGrpcClient:
-    def __init__(self, host: str = "localhost", port: int = 50051):
-        # Создаём канал. insecure_channel — для локальной разработки без TLS.
-        self.channel = grpc.insecure_channel(f"{host}:{port}")
-        self.stub = delivery_pb2_grpc.DeliveryServiceStub(self.channel)
+async def process_message(message: aio_pika.IncomingMessage) -> None:
+    async with message.process():
+        payload = json.loads(message.body)
+        order_id = payload["order_id"]
+        # В реальном проекте — запись в БД доставки.
+        print(f"[Delivery] Подготовка доставки для заказа {order_id}")
 
-    def assign_courier(self, order_id: int, courier_id: int) -> dict:
-        try:
-            request = delivery_pb2.AssignCourierRequest(
-                order_id=order_id, courier_id=courier_id
-            )
-            # Таймаут 5 секунд, чтобы не ждать вечно, если сервис упал.
-            response = self.stub.AssignCourier(request, timeout=5)
-            return {"delivery_id": response.delivery_id, "status": response.status}
-        except grpc.RpcError as e:
-            self._handle_error(e)
 
-    def complete_delivery(self, delivery_id: int) -> dict:
-        try:
-            request = delivery_pb2.CompleteDeliveryRequest(delivery_id=delivery_id)
-            response = self.stub.CompleteDelivery(request, timeout=5)
-            return {"status": response.status}
-        except grpc.RpcError as e:
-            self._handle_error(e)
+async def main() -> None:
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    channel = await connection.channel()
+    await channel.set_qos(prefetch_count=10)
 
-    def get_delivery(self, order_id: int) -> dict:
-        try:
-            request = delivery_pb2.GetDeliveryRequest(order_id=order_id)
-            response = self.stub.GetDelivery(request, timeout=5)
-            return {
-                "id": response.id,
-                "status": response.status,
-                "courier_id": response.courier_id
-            }
-        except grpc.RpcError as e:
-            self._handle_error(e)
+    exchange = await channel.declare_exchange(
+        EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
+    )
 
-    def _handle_error(self, e: grpc.RpcError):
-        """Обработка сетевых ошибок gRPC."""
-        if e.code() == grpc.StatusCode.NOT_FOUND:
-            raise ValueError("Object not found")
-        if e.code() == grpc.StatusCode.UNAVAILABLE:
-            raise ConnectionError("Delivery service is unavailable")
-        if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-            raise TimeoutError("Delivery service timeout")
-        raise RuntimeError(f"gRPC error: {e.details()}")
+    queue = await channel.declare_queue(QUEUE_NAME, durable=True)
+    await queue.bind(exchange, routing_key="order.paid")
+
+    await queue.consume(process_message)
+    print("[Delivery] Ждём события order.paid...")
+
+    await asyncio.Future()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
+Проверка: запустите python delivery_worker.py в третьем терминале. После оплаты заказа в логах появится [Delivery] Подготовка доставки для заказа 42.
 
-### Этап 5. Замена логики в монолите
+Ключевая мысль: кухня и доставка не знают друг о друге. Они оба получили одно и то же событие, но обрабатывают его по-своему.
 
-Что делаем: в OrderService или DeliveryService монолита заменяем прямые вызовы к БД на вызовы DeliveryGrpcClient.
-Зачем: монолит должен перестать работать с таблицей deliveries напрямую.
-Откройте app/modules/delivery/router.py (или service.py, в зависимости от вашей структуры). Замените вызовы DeliveryRepository на DeliveryGrpcClient:
+### Шаг 5. Настройка Dead Letter Queue
+
+Что делаем: создаём DLQ для сообщений, которые не удалось обработать.
+
+Зачем: «битое» сообщение не должно вечно блокировать очередь.
+
+Создайте app/workers/dlq_setup.py — скрипт, который создаёт DLQ-инфраструктуру. Запустите его один раз:
+
 
 ```python
-# Пример для router.py
-from app.modules.delivery.grpc_client import DeliveryGrpcClient
+"""
+Скрипт настройки DLQ. Запускается один раз перед стартом consumer'ов.
+"""
+import asyncio
+import aio_pika
+from aio_pika import ExchangeType
 
-@router.post("/assign")
-def assign_courier(payload: DeliveryAssign):
-    client = DeliveryGrpcClient()
-    try:
-        result = client.assign_courier(payload.order_id, payload.courier_id)
-        return {"status": "success", **result}
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except ConnectionError as e:
-        raise HTTPException(503, str(e))
+RABBITMQ_URL = "amqp://sirius:sirius@localhost:5672/"
+
+
+async def setup() -> None:
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    channel = await connection.channel()
+
+    # Создаём DLX exchange.
+    dlx = await channel.declare_exchange(
+        "dlx_exchange", ExchangeType.DIRECT, durable=True
+    )
+
+    # Создаём очередь DLQ.
+    dlq = await channel.declare_queue("kitchen_dlq", durable=True)
+    await dlq.bind(dlx, routing_key="kitchen.dlq")
+
+    print("DLQ настроена.")
+    await connection.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(setup())
 ```
 
+Проверка: запустите python -m app.workers.dlq_setup. В веб-интерфейсе RabbitMQ (http://localhost:15672) появятся dlx_exchange и kitchen_dlq.
 
-### Этап 6. Запуск и проверка
+Тест: отправьте в kitchen_queue невалидное сообщение (например, строку not-json через Management UI). Оно не будет обработано, вернётся в очередь, а после исчерпания попыток уйдёт в kitchen_dlq.
 
-Что делаем: запускаем два процесса параллельно.
-Терминал 1 (gRPC-сервер):
+### Шаг 6. Запуск и проверка end-to-end
 
-```bash
-source .venv/bin/activate
-python delivery_server.py
-```
+Что делаем: запускаем все процессы и проверяем, что событие доходит до обоих consumer'ов.
 
-Ожидаемый вывод: Delivery gRPC Server running on port 50051.
-Терминал 2 (Монолит):
+- Терминал 1: RabbitMQ (уже запущен через docker compose).
 
-```bash
-source .venv/bin/activate
-uvicorn app.main:app --reload
-```
+- Терминал 2: монолит — uvicorn app.main:app --reload.
 
-Проверка в Swagger: выполните запрос POST /delivery/assign. Убедитесь, что заказ создан, а в логах gRPC-сервера появилась запись об обработке запроса.
+- Терминал 3: кухня — python -m app.workers.kitchen_consumer.
 
+- Терминал 4: доставка — python delivery_worker.py.
+
+- Swagger: выполните POST /orders/{id}/pay.
+
+Ожидаемый результат:
+
+- В терминале кухни: [Kitchen] Принят заказ 42.
+
+- В терминале доставки: [Delivery] Подготовка доставки для заказа 42.
+
+- В веб-интерфейсе RabbitMQ видно exchange sirius_events, очереди kitchen_queue и delivery_queue.
+
+### Шаг 7. Проверка идемпотентности
+
+Что делаем: убеждаемся, что повторная доставка не создаёт дубль.
+
+- Отправьте то же событие OrderPaid вручную через веб-интерфейс RabbitMQ (с тем же event_id).
+
+- В логах кухни не должно появиться повторной записи [Kitchen] Принят заказ 42.
+
+- В БД не должно быть двух KitchenOrder для одного order_id.
+
+Ожидаемый результат: идемпотентность работает.
 
 ## 4. Задание для самостоятельной работы (9–10 баллов)
 
 Вам необходимо доработать систему, выбрав одно из заданий:
-Вариант А (9 баллов). Server Streaming для трекинга доставки.
-Добавьте в .proto метод TrackDelivery(TrackDeliveryRequest) returns (stream DeliveryStatus).
-Сгенерируйте код.
-На сервере реализуйте метод, который отправляет статусы (in_progress → on_the_way → delivered) с задержкой в 2 секунды.
-На клиенте (в монолите) напишите скрипт, который подписывается на этот поток и выводит статусы в консоль.
-Вариант Б (10 баллов). Bidirectional Streaming для чата.
-Добавьте в .proto метод ChatWithCourier(stream ChatMessage) returns (stream ChatMessage).
-Реализуйте сервер, который принимает сообщения от клиента и отправляет ответы в реальном времени.
-Напишите клиент, который отправляет сообщение и ждет ответа.
+
+Вариант А (9 баллов). Saga (хореография) для компенсации.
+
+Реализуйте сценарий: при создании доставки, если курьер не найден, публикуется событие DeliveryFailed. PaymentService (или OrderService) слушает это событие и выполняет компенсацию:
+
+- Меняет статус заказа на cancelled.
+
+- Возвращает деньги клиенту (эмуляция — запись в лог и обновление баланса).
+
+- Публикует событие OrderCancelled.
+
+Каждая компенсация должна быть идемпотентной (через event_id или уникальный compensation_key).
+
+Вариант Б (10 баллов). Transactional Outbox.
+
+Проблема: если RabbitMQ недоступен в момент оплаты, событие OrderPaid не будет опубликовано — заказ оплачен, но кухня о нём не узнает.
+
+Решение:
+
+- Создайте таблицу outbox в БД.
+
+- В OrderService.pay_order записывайте событие в outbox в одной транзакции с обновлением статуса заказа.
+
+- Отдельный фоновый воркер читает из outbox и публикует события в RabbitMQ. После успешной публикации — помечает запись как published.
+
+Это гарантирует, что событие никогда не потеряется, даже если RabbitMQ упал.
+
+Вариант В (10 баллов). Интеграционные тесты для consumer'ов.
+
+Напишите тесты (pytest + testcontainers или pytest-rabbitmq), которые проверяют:
+
+- Consumer обрабатывает корректное сообщение.
+
+- Consumer идемпотентен (повторная обработка не создаёт дубль).
+
+- «Битое» сообщение не ломает очередь (уходит в DLQ).
+
 Задание сдаётся в виде:
-двух запущенных процессов (демонстрация);
-README.md с архитектурной схемой (монолит + gRPC-сервис);
-устной защиты.
+
+- работающей системы (демонстрация);
+
+- README.md с архитектурной схемой (publisher → exchange → queues → consumers);
+
+- устной защиты.
 
 ## 5. Контрольные вопросы для защиты работы
 
-Зачем выносить модуль delivery в отдельный сервис? Какие проблемы это решает?
-Почему для межсервисного общения выбран gRPC, а не REST?
-Что произойдёт, если gRPC-сервис недоступен? Как обработать эту ошибку?
-Почему в идеальном микросервисе у delivery должна быть своя БД? Какие проблемы возникают при использовании общей БД?
-Чем Server Streaming отличается от Unary? Приведите пример.
-Что такое паттерн Strangler Fig и как он связан с выносом delivery?
-Какую роль играет DeliveryGrpcClient в архитектуре монолита? Почему он находится в инфраструктурном слое?
+- Зачем публиковать событие OrderPaid, а не вызывать кухню и доставку напрямую по gRPC?
 
-## 6. Приложение: Структура проекта после внедрения
+- Что такое Exchange и Queue в RabbitMQ? Чем они отличаются?
+
+- Что такое идемпотентность? Как вы её обеспечили в этой работе?
+
+- Почему RabbitMQ использует At-Least-Once, а не Exactly-Once?
+
+- Что такое Dead Letter Queue и зачем она нужна?
+
+- Что произойдёт, если consumer упадёт в момент обработки сообщения?
+
+- Чем событие отличается от команды? Приведите пример для «Сириус.Еды».
+
+- Как Saga решает проблему распределённых транзакций?
+
+## 6. Приложение: структура проекта после внедрения
 
 
 ```text
 sirius_food/
 ├── app/
+│   ├── core/
+│   │   ├── config.py          # + RABBITMQ_URL
+│   │   └── rabbitmq.py        # publish_event
 │   ├── modules/
-│   │   └── delivery/
-│   │       ├── grpc_client.py    # gRPC-клиент (инфраструктура)
-│   │       ├── router.py         # HTTP-эндпоинты (транспорт)
-│   │       └── ...
-│   ├── main.py
-│   └── ...
-├── proto/
-│   └── delivery.proto            # Контракт
-├── delivery_pb2.py               # Сгенерированные сообщения
-├── delivery_pb2_grpc.py          # Сгенерированные Stub и Servicer
-├── delivery_server.py            # gRPC-сервер (микросервис)
-├── docker-compose.yml
-└── requirements.txt
+│   │   └── orders/
+│   │       └── service.py     # + publish_event в pay_order
+│   └── workers/
+│       ├── kitchen_consumer.py
+│       └── dlq_setup.py
+├── delivery_worker.py          # consumer для микросервиса доставки
+├── delivery_server.py          # gRPC-сервер (из ЛР № 6)
+├── docker-compose.yml          # + rabbitmq
+└── requirements.txt            # + aio-pika
+
 ```

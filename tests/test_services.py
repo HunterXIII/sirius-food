@@ -50,20 +50,31 @@ class OrderServiceTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_create_order_writes_off_balance(self):
+    def test_create_order_waits_for_payment(self):
         order_id = self.service.create_order(user_id=1, item_id=1, quantity=2)
 
         self.assertEqual(order_id, 1)
+        self.assertEqual(memory_db.users[1].balance, 500.0)
+        self.assertEqual(memory_db.orders[1].status, "processing")
+
+    def test_pay_order_writes_off_balance_once(self):
+        order_id = self.service.create_order(user_id=1, item_id=1, quantity=2)
+
+        self.service.pay_order(order_id, current_user=memory_db.users[1])
+        self.service.pay_order(order_id, current_user=memory_db.users[1])
+
         self.assertEqual(memory_db.users[1].balance, 100.0)
-        self.assertEqual(memory_db.orders[1].status, "paid")
+        self.assertEqual(memory_db.orders[order_id].status, "paid")
 
     def test_not_enough_money(self):
-        with self.assertRaises(ValueError):
-            self.service.create_order(user_id=1, item_id=1, quantity=3)
+        order_id = self.service.create_order(user_id=1, item_id=1, quantity=3)
 
-        # Ни баланс, ни заказы не должны измениться.
+        with self.assertRaises(ValueError):
+            self.service.pay_order(order_id, current_user=memory_db.users[1])
+
+        # Неудачная оплата не меняет баланс и статус заказа.
         self.assertEqual(memory_db.users[1].balance, 500.0)
-        self.assertEqual(memory_db.orders, {})
+        self.assertEqual(memory_db.orders[order_id].status, "processing")
 
     def test_unavailable_item(self):
         with self.assertRaises(ValueError):
@@ -75,8 +86,6 @@ class OrderServiceTest(unittest.TestCase):
 
     def test_cancel_own_order(self):
         order_id = self.service.create_order(user_id=1, item_id=1, quantity=1)
-        # Отмена по прежнему правилу доступна заказам в processing.
-        memory_db.orders[order_id].status = "processing"
 
         self.service.cancel_order(order_id, current_user=memory_db.users[1])
 
@@ -90,12 +99,10 @@ class OrderServiceTest(unittest.TestCase):
         with self.assertRaises(AccessDeniedError):
             self.service.cancel_order(order_id, current_user=memory_db.users[2])
 
-        self.assertEqual(memory_db.orders[order_id].status, "paid")
+        self.assertEqual(memory_db.orders[order_id].status, "processing")
 
     def test_cancel_twice(self):
         order_id = self.service.create_order(user_id=1, item_id=1, quantity=1)
-        # Отмена по прежнему правилу доступна заказам в processing.
-        memory_db.orders[order_id].status = "processing"
         self.service.cancel_order(order_id, current_user=memory_db.users[1])
 
         with self.assertRaises(ValueError):
