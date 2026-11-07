@@ -50,10 +50,10 @@ class PostgresDeliveryRepository(DeliveryRepository):
         self.db = db
 
     def get_order_by_id(self, order_id: int):
-        return self.db.query(Order).filter(Order.id == order_id).first()
+        return self.db.query(Order).filter(Order.id == order_id).with_for_update().first()
 
     def get_user_by_id(self, user_id: int):
-        return self.db.query(User).filter(User.id == user_id).first()
+        return self.db.query(User).filter(User.id == user_id).with_for_update().first()
 
     def get_delivery_by_id(self, delivery_id: int):
         return self.db.query(Delivery).filter(Delivery.id == delivery_id).first()
@@ -70,11 +70,15 @@ class PostgresDeliveryRepository(DeliveryRepository):
         ).first()
 
     def save_delivery(self, order_id: int, courier_id: int, status: str) -> int:
-        new_delivery = Delivery(
-            order_id=order_id,
-            courier_id=courier_id,
-            status=status,
-        )
+        # Consumer и gRPC последовательно работают с одним заказом.
+        self.db.query(Order).filter_by(id=order_id).with_for_update().one()
+        new_delivery = self.db.query(Delivery).filter_by(order_id=order_id).first()
+        if new_delivery is not None and new_delivery.status != "pending":
+            raise ValueError("Доставка для заказа уже создана")
+        if new_delivery is None:
+            new_delivery = Delivery(order_id=order_id)
+        new_delivery.courier_id = courier_id
+        new_delivery.status = status
         self.db.add(new_delivery)
         self.db.commit()
         self.db.refresh(new_delivery)

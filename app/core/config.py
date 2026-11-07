@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379"
+    RABBITMQ_URL: str = "amqp://sirius:sirius@localhost:5672/"
     DEBUG: bool = False
     ALLOWED_ORIGINS: list[str] = []
     # Какую реализацию репозиториев использовать (из lab2):

@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app import memory_db
 from app.core.config import settings
-from app.models import Order, User, MenuItem
+from app.core.events import order_paid
+from app.models import Order, User, MenuItem, OutboxEvent
 
 
 class OrderRepository(ABC):
@@ -51,6 +52,10 @@ class OrderRepository(ABC):
     @abstractmethod
     def count_orders_by_day(self, day: date) -> int:
         """Сколько заказов создано в этот день."""
+
+    @abstractmethod
+    def pay_order(self, order, amount: float) -> None:
+        """Оплатить существующий заказ и сохранить событие одной транзакцией."""
 
 
 class PostgresOrderRepository(OrderRepository):
@@ -96,6 +101,24 @@ class PostgresOrderRepository(OrderRepository):
         # SELECT count(*) FROM orders WHERE date(created_at) = :day
         return self.db.query(Order).filter(func.date(Order.created_at) == day).count()
 
+    def pay_order(self, order, amount: float) -> None:
+        # Повторная оплата, в том числе одновременная, не списывает деньги снова.
+        order = self.db.query(Order).filter_by(id=order.id).populate_existing().with_for_update().one()
+        if order.status == "paid":
+            return
+        if order.status != "processing":
+            raise ValueError("Этот заказ нельзя оплатить")
+        user = self.db.query(User).filter_by(id=order.user_id).populate_existing().with_for_update().one()
+        if user.balance < amount:
+            raise ValueError("Недостаточно средств на балансе студента")
+        user.balance -= amount
+        order.status = "paid"
+        self.db.flush()
+        payload = order_paid(order.id, order.user_id, amount)
+        self.db.add(OutboxEvent(id=payload["event_id"], routing_key="order.paid", payload=payload))
+        # Ни списание, ни заказ не фиксируются отдельно от события.
+        self.db.commit()
+
 
 class InMemoryOrderRepository(OrderRepository):
     """Реализация, которая хранит данные в памяти (app/memory_db.py)."""
@@ -135,6 +158,14 @@ class InMemoryOrderRepository(OrderRepository):
             order for order in memory_db.orders.values()
             if order.created_at and order.created_at.date() == day
         ])
+
+    def pay_order(self, order, amount: float) -> None:
+        user = self.get_user_by_id(order.user_id)
+        if user.balance < amount:
+            raise ValueError("Недостаточно средств на балансе студента")
+        self.update_user_balance(user, user.balance - amount)
+        order.status = "paid"
+        self.update_order(order)
 
 
 def get_order_repository(db: Session) -> OrderRepository:

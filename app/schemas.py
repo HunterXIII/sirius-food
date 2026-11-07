@@ -55,7 +55,7 @@ class DeliveryAssign(BaseModel):
 class DeliveryResponse(BaseModel):
     id: int
     order_id: int
-    courier_id: int
+    courier_id: int | None
     status: str
 
     model_config = ConfigDict(from_attributes=True)

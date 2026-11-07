@@ -57,7 +57,7 @@ class DeliveryServicer(rpc.DeliveryServiceServicer):
             return pb.GetDeliveryResponse(
                 id=delivery.id,
                 order_id=delivery.order_id,
-                courier_id=delivery.courier_id,
+                courier_id=delivery.courier_id or 0,
                 status=delivery.status,
             )
 

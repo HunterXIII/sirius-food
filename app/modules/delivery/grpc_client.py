@@ -22,7 +22,7 @@ class DeliveryGrpcClient:
         return {
             "id": response.id,
             "order_id": response.order_id,
-            "courier_id": response.courier_id,
+            "courier_id": response.courier_id or None,
             "status": response.status,
         }
 

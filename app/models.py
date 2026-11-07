@@ -3,7 +3,7 @@
 """
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -90,3 +90,31 @@ class Delivery(Base):
 
     order = relationship("Order")
     courier = relationship("User")
+
+
+class KitchenOrder(Base):
+    """Заказ, который кухня получила через RabbitMQ."""
+    __tablename__ = "kitchen_orders"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), unique=True, nullable=False)
+    status = Column(String, default="pending", nullable=False)
+
+
+class ProcessedEvent(Base):
+    """У каждого consumer свой список обработанных событий."""
+    __tablename__ = "processed_events"
+
+    consumer = Column(String(50), primary_key=True)
+    id = Column(String(36), primary_key=True)
+
+
+class OutboxEvent(Base):
+    """Событие сохраняется вместе с локальным шагом, публикуется отдельным воркером."""
+    __tablename__ = "outbox"
+
+    id = Column(String(36), primary_key=True)
+    routing_key = Column(String(100), nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    published = Column(Boolean, default=False, nullable=False, index=True)

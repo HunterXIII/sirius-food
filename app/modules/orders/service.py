@@ -32,13 +32,7 @@ class OrderService:
         if not item.is_available:
             raise ValueError("Блюдо недоступно")
 
-        total_cost = item.price * quantity
-        if user.balance < total_cost:
-            raise ValueError("Недостаточно средств на балансе студента")
-
-        # Списываем деньги и сохраняем заказ. Как именно - решает репозиторий.
-        self.repository.update_user_balance(user, user.balance - total_cost)
-        order_id = self.repository.save_order(user_id, item_id, quantity, status="paid")
+        order_id = self.repository.save_order(user_id, item_id, quantity, status="processing")
 
         # Тяжёлые операции - в фоне. .delay() только кладёт задачу в очередь (Redis)
         # и сразу возвращает управление, выполнит задачу воркер Celery.
@@ -50,16 +44,32 @@ class OrderService:
 
         return order_id
 
+    def pay_order(self, order_id: int, current_user):
+        """Оплата созданного заказа в processing. Повторный запрос безопасен."""
+        order = self.repository.get_order_by_id(order_id)
+        if order is None:
+            raise NotFoundError("Заказ не найден")
+        if order.user_id != current_user.id:
+            raise AccessDeniedError("Нельзя оплатить чужой заказ")
+        if order.status == "paid":
+            return order
+        if order.status != "processing":
+            raise ValueError("Этот заказ нельзя оплатить")
+        item = self.repository.get_menu_item_by_id(order.item_id)
+        if item is None:
+            raise NotFoundError("Блюдо не найдено")
+        if not item.is_available:
+            raise ValueError("Блюдо недоступно")
+        self.repository.pay_order(order, item.price * order.quantity)
+        return order
+
     def count_orders_by_day(self, day) -> int:
         """Статистика: сколько заказов сделано за день (считает периодическая задача)."""
         return self.repository.count_orders_by_day(day)
 
     def get_kitchen_orders(self) -> list:
-        """Оплаченные заказы и старые заказы со статусом processing."""
-        return (
-            self.repository.get_orders_by_status("paid")
-            + self.repository.get_orders_by_status("processing")
-        )
+        """Кухня видит только оплаченные заказы."""
+        return self.repository.get_orders_by_status("paid")
 
     def cancel_order(self, order_id: int, current_user):
         """
@@ -77,7 +87,7 @@ class OrderService:
             raise AccessDeniedError("Нельзя отменить чужой заказ")
 
         if order.status != "processing":
-            raise ValueError("Отменить можно только заказ, который ещё готовится")
+            raise ValueError("Отменить можно только неоплаченный заказ")
 
         order.status = "cancelled"
         self.repository.update_order(order)
