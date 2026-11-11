@@ -3,7 +3,8 @@
 """
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, JSON
+from pgvector.sqlalchemy import VECTOR
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, JSON, Index, Text
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -118,3 +119,36 @@ class OutboxEvent(Base):
     payload = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     published = Column(Boolean, default=False, nullable=False, index=True)
+
+
+class AssistantDocument(Base):
+    __tablename__ = "assistant_documents"
+
+    source_key = Column(String(100), primary_key=True)
+    search_text = Column(String, nullable=False)
+    embedding = Column(VECTOR(384).with_variant(JSON(), "sqlite"), nullable=False)
+
+
+class AssistantChat(Base):
+    __tablename__ = "assistant_chats"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+
+class AssistantReply(Base):
+    __tablename__ = "assistant_replies"
+    __table_args__ = (
+        Index("ix_assistant_replies_user_created", "user_id", "created_at", "id"),
+        Index("ix_assistant_replies_chat_created", "chat_id", "created_at", "id"),
+    )
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    chat_id = Column(String(36), ForeignKey("assistant_chats.id", name="fk_assistant_replies_chat"))
+    helpful = Column(Boolean)
+    message = Column(Text)
+    answer = Column(Text)
+    mode = Column(String(20))
+    sources = Column(JSON)
+    created_at = Column(DateTime(timezone=True))

@@ -9,6 +9,7 @@ import grpc
 
 import delivery_pb2 as pb
 import delivery_pb2_grpc as rpc
+from app.core.config import settings
 from app.database import SessionLocal
 from app.exceptions import AccessDeniedError, ForbiddenError, NotFoundError
 from app.modules.delivery.repository import PostgresDeliveryRepository
@@ -81,7 +82,7 @@ class DeliveryServicer(rpc.DeliveryServiceServicer):
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     rpc.add_DeliveryServiceServicer_to_server(DeliveryServicer(), server)
-    server.add_insecure_port("127.0.0.1:50051")
+    server.add_insecure_port(settings.DELIVERY_GRPC_BIND)
     server.start()
     print("Delivery gRPC Server running on port 50051", flush=True)
     try:

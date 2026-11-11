@@ -1,32 +1,135 @@
+x-app: &app
+  image: sirius-food-local
+  pull_policy: never
+  restart: unless-stopped
+  environment: &app-env
+    SECRET_KEY: ${SECRET_KEY:?Укажите SECRET_KEY в .env}
+    DATABASE_URL: postgresql://${POSTGRES_USER:-sirius}:${POSTGRES_PASSWORD:-sirius}@db:5432/${POSTGRES_DB:-sirius_food}
+    REDIS_URL: redis://redis:6379
+    RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-sirius}:${RABBITMQ_DEFAULT_PASS:-sirius}@rabbitmq:5672/
+    DELIVERY_GRPC_TARGET: delivery-grpc:50051
+    REPOSITORY: postgres
+  depends_on: &app-dependencies
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+
 services:
   db:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
-      POSTGRES_USER: sirius
-      POSTGRES_PASSWORD: sirius
-      POSTGRES_DB: sirius_food
+      POSTGRES_USER: ${POSTGRES_USER:-sirius}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sirius}
+      POSTGRES_DB: ${POSTGRES_DB:-sirius_food}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   rabbitmq:
     image: rabbitmq:3.13-management
     container_name: sirius_rabbitmq
-    hostname: sirius-rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
+    hostname: rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: sirius
-      RABBITMQ_DEFAULT_PASS: sirius
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-sirius}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-sirius}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0"]
+    environment:
+      <<: *app-env
+      DEBUG: ${DEBUG:-True}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-[]}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
+    depends_on:
+      <<: *app-dependencies
+      delivery-grpc:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  delivery-grpc:
+    <<: *app
+    command: ["python", "delivery_server.py"]
+    environment:
+      <<: *app-env
+      DELIVERY_GRPC_BIND: "0.0.0.0:50051"
+    ports:
+      - "127.0.0.1:50051:50051"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50051), timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kitchen:
+    <<: *app
+    command: ["python", "-m", "app.workers.kitchen_consumer"]
+
+  delivery-worker:
+    <<: *app
+    command: ["python", "delivery_worker.py"]
+
+  orders-worker:
+    <<: *app
+    command: ["python", "-m", "app.workers.orders_consumer"]
+
+  outbox:
+    <<: *app
+    command: ["python", "-m", "app.workers.outbox_worker"]
+
+  celery-worker:
+    <<: *app
+    command: ["celery", "-A", "app.core.celery_app", "worker", "-Q", "default", "--concurrency=2", "--loglevel=info"]
+
+  celery-beat:
+    <<: *app
+    command: ["celery", "-A", "app.core.celery_app", "beat", "--schedule=/tmp/celerybeat-schedule", "--loglevel=info"]
+
+  flower:
+    <<: *app
+    command: ["celery", "-A", "app.core.celery_app", "flower"]
+    ports:
+      - "127.0.0.1:5555:5555"
 
 volumes:
   pg_data:

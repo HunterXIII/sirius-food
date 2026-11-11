@@ -6,9 +6,8 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.core.config import settings
 
-# SQL-запросы печатаются в терминал только в режиме отладки:
-# в логах видны параметры запросов (хеши паролей, токенов).
-engine = create_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+# В режиме отладки логируем SQL без значений параметров.
+engine = create_engine(settings.DATABASE_URL, echo=settings.DEBUG, hide_parameters=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
