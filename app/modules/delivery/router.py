@@ -21,7 +21,7 @@ def get_delivery_service():
         yield DeliveryService(InMemoryDeliveryRepository())
         return
 
-    with grpc.insecure_channel("127.0.0.1:50051") as channel:
+    with grpc.insecure_channel(settings.DELIVERY_GRPC_TARGET) as channel:
         yield DeliveryGrpcClient(channel)
 
 

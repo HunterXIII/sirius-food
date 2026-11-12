@@ -2,6 +2,7 @@
 Настройки приложения. Читаются из файла .env (или переменных окружения).
 Секретов в коде нет.
 """
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,8 +15,11 @@ class Settings(BaseSettings):
     RABBITMQ_URL: str = "amqp://sirius:sirius@localhost:5672/"
     DELIVERY_GRPC_TARGET: str = "127.0.0.1:50051"
     DELIVERY_GRPC_BIND: str = "127.0.0.1:50051"
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: str = ""
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "openrouter/free"
+    ASSISTANT_MAX_DOCUMENTS: int = Field(default=6, ge=1)
+    ASSISTANT_MAX_COSINE_DISTANCE: float = Field(default=0.20, ge=0, le=2)
     EMBEDDING_MODEL_DIR: str = "/opt/embeddings"
     DEBUG: bool = False
     ALLOWED_ORIGINS: list[str] = []

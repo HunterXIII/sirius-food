@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.redis import check_redis_connection
 from app.database import SessionLocal
 from app.modules.assistant.router import router as assistant_router
+from app.modules.assistant.tracing import assistant_tracing
 from app.modules.auth.router import router as auth_router
 from app.modules.users.router import router as users_router
 from app.modules.menu.router import router as menu_router
@@ -37,7 +38,8 @@ async def lifespan(app: FastAPI):
     # Код до yield выполняется при старте приложения, после yield - при остановке.
     # Это замена устаревшему @app.on_event("startup").
     warm_up_menu_cache()
-    yield
+    with assistant_tracing(settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT):
+        yield
 
 
 app = FastAPI(

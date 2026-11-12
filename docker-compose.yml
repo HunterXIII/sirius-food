@@ -62,6 +62,17 @@ services:
       timeout: 5s
       retries: 20
 
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    restart: unless-stopped
+    environment:
+      PHOENIX_ENABLE_AUTH: "false"
+      PHOENIX_WORKING_DIR: /mnt/data
+    ports:
+      - "127.0.0.1:6006:6006"
+    volumes:
+      - phoenix_data:/mnt/data
+
   migrate:
     <<: *app
     restart: "no"
@@ -78,7 +89,10 @@ services:
       <<: *app-env
       DEBUG: ${DEBUG:-True}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-[]}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT-http://phoenix:6006/v1/traces}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ASSISTANT_MAX_DOCUMENTS: ${ASSISTANT_MAX_DOCUMENTS:-6}
+      ASSISTANT_MAX_COSINE_DISTANCE: ${ASSISTANT_MAX_COSINE_DISTANCE:-0.20}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
     depends_on:
       <<: *app-dependencies
@@ -134,3 +148,4 @@ services:
 volumes:
   pg_data:
   rabbitmq_data:
+  phoenix_data:

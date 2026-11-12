@@ -6,13 +6,15 @@ from unittest.mock import Mock, patch
 import httpx
 
 from app.modules.assistant.openrouter import OpenRouterClient
-from app.modules.assistant.repository import AssistantRepository, ConversationTurn, Source
+from app.modules.assistant.repository import AssistantRepository, ConversationTurn, OrderDetails, Source
 from app.modules.assistant.service import AssistantService
 
 
 class AssistantTest(unittest.TestCase):
     def setUp(self):
         self.repository = Mock()
+        self.repository.get_orders.return_value = []
+        self.repository.ordered_dishes.return_value = []
         self.service = AssistantService(self.repository, OpenRouterClient("test-key", "test-model:free"))
 
     @patch("app.modules.assistant.openrouter.httpx.post")
@@ -39,6 +41,7 @@ class AssistantTest(unittest.TestCase):
             answer=answer.text,
             mode="rag",
             sources=answer.sources,
+            phoenix_span_id=None,
         )
 
     @patch("app.modules.assistant.openrouter.httpx.post")
@@ -52,34 +55,32 @@ class AssistantTest(unittest.TestCase):
         self.assertEqual(answer.mode, "fallback")
         self.assertEqual(answer.sources[0].key, "menu:1")
 
-    def test_order_status_uses_user_and_order_id(self):
-        self.repository.get_order_details.return_value = SimpleNamespace(
-            id=5, status="paid", delivery_status="in_progress",
-        )
+    @patch("app.modules.assistant.openrouter.httpx.post")
+    def test_explicit_order_status_and_contents_use_model(self, post):
+        self.repository.get_orders.return_value = [OrderDetails(
+            id=64, status="paid", quantity=2, dish_name="Борщ", delivery_status="in_progress",
+        )]
+        self.repository.find_sources.return_value = []
+        post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "В заказе 2 порции борща. Он в доставке."}}],
+        }
 
-        _, _, answer = self.service.chat("Где мой заказ №5?", 2, None)
-
-        self.assertEqual(answer.text, "Заказ №5 в доставке.")
-        self.repository.get_order_details.assert_called_once_with(2, 5)
-        self.repository.find_sources.assert_not_called()
-
-    def test_order_contents_for_explicit_and_latest_order(self):
-        self.repository.get_order_details.return_value = SimpleNamespace(
-            id=64, status="processing", dish_name="Борщ", quantity=2,
-        )
-
-        for message, order_id in (
-            ("что находиться в моём заказе?", 64),
-            ("Что в моём заказе?", None),
-        ):
+        for message, order_id in (("Где мой заказ №64?", None), ("Что в моём заказе?", 64)):
             with self.subTest(message=message):
                 _, _, answer = self.service.chat(message, 2, order_id)
+                self.assertEqual(answer.mode, "rag")
+                self.assertIn("2 порции борща", answer.text)
+                self.repository.get_orders.assert_called_with(2, 64)
+                payload = json.loads(post.call_args.kwargs["json"]["messages"][1]["content"])
+                self.assertEqual(payload["orders"][0]["quantity"], 2)
+                self.assertEqual(payload["orders"][0]["status_text"], "в доставке")
 
-                self.assertEqual(answer.text, "В заказе №64 — «Борщ», 2 шт.")
-                self.assertEqual(answer.mode, "order")
-                self.repository.get_order_details.assert_called_with(2, order_id)
-        self.repository.find_sources.assert_not_called()
+    @patch("app.modules.assistant.openrouter.httpx.post")
+    def test_unavailable_explicit_order_does_not_call_model(self, post):
+        _, _, answer = self.service.chat("Где заказ №64?", 2, None)
 
+        self.assertEqual(answer.text, "Заказ не найден среди ваших заказов.")
+        post.assert_not_called()
 
     @patch("app.modules.assistant.openrouter.httpx.post")
     def test_followup_uses_chat_context_and_fresh_sources(self, post):
@@ -119,3 +120,53 @@ class AssistantTest(unittest.TestCase):
 
         self.assertEqual(sources, [Source("menu:1", "Борщ — Супы", "Цена 100 ₽. В наличии.")])
         embed.assert_not_called()
+
+
+    @patch("app.modules.assistant.openrouter.httpx.post")
+    def test_model_receives_current_order_context(self, post):
+        self.repository.get_orders.return_value = [OrderDetails(
+            5, "cancelled", 1, "Борщ", "failed", "Свободный курьер не найден",
+        )]
+        self.repository.find_sources.return_value = []
+        self.repository.ordered_dishes.return_value = ["Плов", "Салат"]
+        post.return_value.json.return_value = {"choices": [{"message": {"content": "Заказ отменён."}}]}
+
+        _, _, answer = self.service.chat("Почему так произошло?", 7, None)
+
+        self.repository.get_orders.assert_called_once_with(7, None)
+        payload = json.loads(post.call_args.kwargs["json"]["messages"][1]["content"])
+        self.assertEqual(payload["orders"][0]["cancellation_reason"], "Свободный курьер не найден")
+        self.assertEqual(payload["orders"][0]["status_text"], "отменён")
+        self.assertFalse(payload["orders"][0]["active"])
+        self.assertEqual(payload["ordered_dishes"], ["Плов", "Салат"])
+        self.assertEqual(answer.mode, "rag")
+
+
+    @patch("app.modules.assistant.openrouter.httpx.post")
+    def test_order_followup_passes_all_active_orders_and_history(self, post):
+        self.repository.owns_chat.return_value = True
+        self.repository.recent_context.return_value = [ConversationTurn("Какие мои заказы?", "Заказы №6 и №5.")]
+        self.repository.get_orders.return_value = [
+            OrderDetails(6, "paid", 1, "Плов", "in_progress"),
+            OrderDetails(5, "processing", 1, "Борщ", None),
+        ]
+        self.repository.find_sources.return_value = []
+        post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "Заказ №6 в доставке. Заказ №5 ожидает оплаты."}}],
+        }
+
+        _, _, answer = self.service.chat("А что с ними сейчас?", 7, None, "my-chat")
+
+        self.assertEqual(answer.mode, "rag")
+        payload = json.loads(post.call_args.kwargs["json"]["messages"][1]["content"])
+        self.assertEqual([item["id"] for item in payload["orders"]], [6, 5])
+        self.assertEqual(payload["history"][0]["answer"], "Заказы №6 и №5.")
+
+    def test_order_history_lists_dishes(self):
+        self.repository.ordered_dishes.return_value = ["Борщ", "Плов"]
+
+        _, _, answer = self.service.chat("Что я уже заказывал?", 7, None)
+
+        self.assertEqual(answer.text, "Вы уже заказывали:\n• Борщ\n• Плов")
+        self.repository.ordered_dishes.assert_called_once_with(7)
+        self.repository.find_sources.assert_not_called()

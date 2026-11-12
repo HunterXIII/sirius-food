@@ -147,6 +147,7 @@ class AssistantReply(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     chat_id = Column(String(36), ForeignKey("assistant_chats.id", name="fk_assistant_replies_chat"))
     helpful = Column(Boolean)
+    phoenix_span_id = Column(String(16))
     message = Column(Text)
     answer = Column(Text)
     mode = Column(String(20))

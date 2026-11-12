@@ -5,6 +5,7 @@ import grpc
 
 import delivery_pb2 as pb
 import delivery_pb2_grpc as rpc
+from app.core.config import settings
 from app.exceptions import ForbiddenError, NotFoundError
 
 
@@ -59,7 +60,7 @@ class DeliveryGrpcClient:
 def log_delivery_statuses(delivery_id: int, user_id: int):
     logger = logging.getLogger("uvicorn.error")
     # Фоновая подписка использует свой канал после завершения HTTP-запроса.
-    with grpc.insecure_channel("127.0.0.1:50051") as channel:
+    with grpc.insecure_channel(settings.DELIVERY_GRPC_TARGET) as channel:
         client = DeliveryGrpcClient(channel)
         try:
             for response in client.track_delivery(delivery_id, user_id):
