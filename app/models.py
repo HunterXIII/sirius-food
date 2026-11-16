@@ -1,10 +1,13 @@
 """
 Определение ORM-моделей предметной области «Сириус.Еда».
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import VECTOR
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, JSON, Index, Text
+from sqlalchemy import (
+    Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index, Integer,
+    JSON, Numeric, String, Text, UniqueConstraint, text,
+)
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -73,6 +76,8 @@ class Order(Base):
     item_id = Column(Integer, ForeignKey("menu_items.id"))
     quantity = Column(Integer, nullable=False)
     status = Column(String, default="processing")
+    total_amount = Column(Numeric(12, 2))
+    cancellation_reason = Column(Text)
     # Время создания (lab5, для статистики). Ставит SQLAlchemy при INSERT.
     # У заказов, созданных до lab5, его нет.
     created_at = Column(DateTime, default=datetime.now, nullable=True)
@@ -119,6 +124,51 @@ class OutboxEvent(Base):
     payload = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     published = Column(Boolean, default=False, nullable=False, index=True)
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+class GatewayOperation:
+    id = Column(String(36), primary_key=True)
+    gateway_id = Column(String(64), unique=True)
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="RUB")
+    status = Column(String(20), nullable=False, default="creating")
+    reason = Column(String(80))
+    attempts = Column(Integer, nullable=False, default=0)
+    first_sent_at = Column(DateTime(timezone=True))
+    next_check_at = Column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class Payment(GatewayOperation, Base):
+    __tablename__ = "payments"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_payments_user_key"),
+        Index(
+            "uq_payments_open_or_paid_order", "order_id", unique=True,
+            postgresql_where=text("status <> 'canceled'"),
+            sqlite_where=text("status <> 'canceled'"),
+        ),
+        CheckConstraint("amount > 0", name="ck_payments_positive_amount"),
+    )
+
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    idempotency_key = Column(String(64), nullable=False)
+    expected_amount = Column(Numeric(12, 2))
+    return_url = Column(Text, nullable=False)
+    confirmation_url = Column(Text)
+    paid_event_id = Column(String(36), unique=True)
+
+
+class Refund(GatewayOperation, Base):
+    __tablename__ = "refunds"
+    __table_args__ = (CheckConstraint("amount > 0", name="ck_refunds_positive_amount"),)
+
+    payment_id = Column(String(36), ForeignKey("payments.id"), nullable=False, unique=True)
 
 
 class AssistantDocument(Base):

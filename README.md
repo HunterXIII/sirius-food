@@ -2,6 +2,8 @@
 
 Трек F учебной практики. Чат отвечает по меню и FAQ, показывает состав и статус заказов пользователя и предлагает повторить доступное блюдо из истории.
 
+Трек D описан в [руководстве по оплате через ЮKassa](labs/README-payments.md).
+
 ## Запуск
 
 При первом запуске создайте `.env` из `.env.example`, если своего файла ещё нет. Задайте собственный `SECRET_KEY` и добавьте `OPENROUTER_API_KEY` из [настроек OpenRouter](https://openrouter.ai/settings/keys). По умолчанию используется `openrouter/free`. При пустом ключе заказы и история работают, а на запрос генерации чат возвращает сообщение о временной недоступности.
@@ -12,7 +14,7 @@
 docker compose up
 ```
 
-Compose соберёт образ с файлами модели, запустит PostgreSQL с pgvector, Redis и RabbitMQ, применит миграции и поднимет API, gRPC-доставку, обработчики событий, Celery, Beat, Flower и Phoenix. PostgreSQL и RabbitMQ используют прежние именованные тома. После изменений кода пересоберите образ через `docker compose up --build`.
+Compose соберёт образ с файлами модели, запустит PostgreSQL с pgvector, Redis и RabbitMQ, применит миграции и поднимет API, gRPC-доставку, обработчики событий, воркер платежей, Celery, Beat, Flower и Phoenix. PostgreSQL и RabbitMQ используют прежние именованные тома. После изменений кода пересоберите образ через `docker compose up --build`.
 
 - [Swagger](http://127.0.0.1:8000/docs) при `DEBUG=True`.
 - [RabbitMQ Management](http://127.0.0.1:15672) с учётными данными из `.env.example` или `.env`.

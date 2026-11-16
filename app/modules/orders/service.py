@@ -3,6 +3,7 @@
 Здесь нет импортов fastapi и sqlalchemy: сервис не знает ни про HTTP, ни про БД.
 """
 from app.exceptions import NotFoundError, AccessDeniedError
+from app.modules.orders.amounts import order_total
 from app.modules.orders.repository import OrderRepository
 from app.tasks.orders import generate_order_pdf, send_order_email, send_order_sms
 
@@ -32,7 +33,8 @@ class OrderService:
         if not item.is_available:
             raise ValueError("Блюдо недоступно")
 
-        order_id = self.repository.save_order(user_id, item_id, quantity, status="processing")
+        total = order_total(item.price, quantity)
+        order_id = self.repository.save_order(user_id, item_id, quantity, status="processing", total_amount=total)
 
         # Тяжёлые операции - в фоне. .delay() только кладёт задачу в очередь (Redis)
         # и сразу возвращает управление, выполнит задачу воркер Celery.

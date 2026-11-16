@@ -17,6 +17,11 @@ x-app: &app
     rabbitmq:
       condition: service_healthy
 
+x-yookassa: &yookassa-env
+  YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID:-}
+  YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY:-}
+  YOOKASSA_RETURN_URL: ${YOOKASSA_RETURN_URL:-http://127.0.0.1:8000/docs}
+
 services:
   db:
     image: pgvector/pgvector:pg15
@@ -86,7 +91,7 @@ services:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0"]
     environment:
-      <<: *app-env
+      <<: [*app-env, *yookassa-env]
       DEBUG: ${DEBUG:-True}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-[]}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT-http://phoenix:6006/v1/traces}
@@ -126,6 +131,12 @@ services:
   orders-worker:
     <<: *app
     command: ["python", "-m", "app.workers.orders_consumer"]
+
+  payments-worker:
+    <<: *app
+    environment:
+      <<: [*app-env, *yookassa-env]
+    command: ["python", "-m", "app.workers.payments_worker"]
 
   outbox:
     <<: *app

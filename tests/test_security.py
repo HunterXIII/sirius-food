@@ -115,7 +115,7 @@ class SecurityTest(unittest.TestCase):
         unpaid = client.get("/orders/kitchen/orders", headers=auth("cook@sirius.ru"))
         self.assertEqual(unpaid.status_code, 200)
         self.assertEqual(unpaid.json(), [])
-        client.post("/orders/1/pay", headers=headers)
+        memory_db.orders[1].status = "paid"
 
         response = client.get("/orders/kitchen/orders", headers=auth("cook@sirius.ru"))
 
@@ -139,13 +139,14 @@ class SecurityTest(unittest.TestCase):
 
     # ---------- 403: чужой объект (IDOR)
 
-    def test_cancel_foreign_order_403(self):
-        client.post("/orders/create", json={"item_id": 1, "quantity": 1}, headers=auth("ivan@sirius.ru"))
+    def test_legacy_pay_and_cancel_endpoints_are_disabled(self):
+        headers = auth("ivan@sirius.ru")
+        client.post("/orders/create", json={"item_id": 1, "quantity": 1}, headers=headers)
 
-        response = client.post("/orders/1/cancel", headers=auth("petr@sirius.ru"))
-
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(client.post("/orders/1/pay", headers=headers).status_code, 404)
+        self.assertEqual(client.post("/orders/1/cancel", headers=headers).status_code, 404)
         self.assertEqual(memory_db.orders[1].status, "processing")
+        self.assertEqual(memory_db.users[1].balance, 1000)
 
     def test_topup_foreign_balance_403(self):
         response = client.post("/users/1/topup?amount=100", headers=auth("petr@sirius.ru"))

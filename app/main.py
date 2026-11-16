@@ -19,6 +19,7 @@ from app.modules.menu.router import router as menu_router
 from app.modules.menu.repository import get_menu_repository
 from app.modules.orders.router import router as orders_router
 from app.modules.delivery.router import router as delivery_router
+from app.modules.payments.router import router as payments_router
 
 
 def warm_up_menu_cache():
@@ -58,7 +59,7 @@ app.add_middleware(
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
 )
 
 # Пути в auth-роутере уже начинаются с /auth (как в методичке), префикс не нужен.
@@ -69,3 +70,4 @@ app.include_router(menu_router, prefix="/menu", tags=["menu"])
 app.include_router(orders_router, prefix="/orders", tags=["orders"])
 app.include_router(delivery_router, prefix="/delivery", tags=["delivery"])
 app.include_router(assistant_router, prefix="/assistant", tags=["assistant"])
+app.include_router(payments_router, prefix="/payments", tags=["payments"])

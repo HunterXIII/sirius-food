@@ -1,6 +1,8 @@
 """События оплаты и компенсации. При повторной отправке event_id не меняется."""
 from uuid import uuid4
 
+NO_COURIER_REASON = "Свободный курьер не найден"
+
 
 def order_paid(order_id: int, customer_id: int, amount: float) -> dict:
     return {

@@ -5,6 +5,7 @@
 """
 from abc import ABC, abstractmethod
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -30,7 +31,7 @@ class OrderRepository(ABC):
         """Найти блюдо по id. Если нет - вернуть None."""
 
     @abstractmethod
-    def save_order(self, user_id: int, item_id: int, quantity: int, status: str) -> int:
+    def save_order(self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal) -> int:
         """Сохранить новый заказ и вернуть его id."""
 
     @abstractmethod
@@ -70,12 +71,13 @@ class PostgresOrderRepository(OrderRepository):
     def get_menu_item_by_id(self, item_id: int):
         return self.db.query(MenuItem).filter(MenuItem.id == item_id).first()
 
-    def save_order(self, user_id: int, item_id: int, quantity: int, status: str) -> int:
+    def save_order(self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal) -> int:
         new_order = Order(
             user_id=user_id,
             item_id=item_id,
             quantity=quantity,
             status=status,
+            total_amount=total_amount,
         )
         self.db.add(new_order)
         self.db.commit()
@@ -129,7 +131,7 @@ class InMemoryOrderRepository(OrderRepository):
     def get_menu_item_by_id(self, item_id: int):
         return memory_db.menu_items.get(item_id)
 
-    def save_order(self, user_id: int, item_id: int, quantity: int, status: str) -> int:
+    def save_order(self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal) -> int:
         order_id = len(memory_db.orders) + 1
         memory_db.orders[order_id] = memory_db.OrderRecord(
             id=order_id,
@@ -137,6 +139,7 @@ class InMemoryOrderRepository(OrderRepository):
             item_id=item_id,
             quantity=quantity,
             status=status,
+            total_amount=total_amount,
             created_at=datetime.now(),
         )
         return order_id

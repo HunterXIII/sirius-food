@@ -6,6 +6,7 @@
 """
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 
 @dataclass
@@ -53,6 +54,7 @@ class OrderRecord:
     quantity: int
     status: str
     created_at: datetime | None = None
+    total_amount: Decimal | None = None
 
 
 @dataclass

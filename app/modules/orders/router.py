@@ -5,9 +5,9 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.core.dependencies import get_current_user, require_role
+from app.core.dependencies import require_role
 from app.database import get_db
-from app.exceptions import NotFoundError, AccessDeniedError
+from app.exceptions import NotFoundError
 from app.schemas import OrderCreate, OrderResponse
 from app.modules.orders.repository import get_order_repository
 from app.modules.orders.service import OrderService
@@ -55,38 +55,3 @@ def kitchen_orders(
 ):
     service = OrderService(get_order_repository(db))
     return service.get_kitchen_orders()
-
-
-@router.post("/{order_id}/cancel")
-def cancel_order(
-    order_id: int,
-    current_user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    service = OrderService(get_order_repository(db))
-    try:
-        service.cancel_order(order_id, current_user)
-    except NotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except AccessDeniedError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "success"}
-
-
-@router.post("/{order_id}/pay", response_model=OrderResponse)
-def pay_order(
-    order_id: int,
-    current_user=Depends(require_role("student")),
-    db: Session = Depends(get_db),
-):
-    service = OrderService(get_order_repository(db))
-    try:
-        return service.pay_order(order_id, current_user)
-    except NotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except AccessDeniedError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))

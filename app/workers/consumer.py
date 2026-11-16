@@ -1,15 +1,15 @@
 """Consumer'ы кухни, доставки и заказов. Локальные шаги Saga сохраняются с outbox."""
 import asyncio
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 from sqlalchemy import exists
 from sqlalchemy.dialects.postgresql import insert
 
-from app.core.events import delivery_failed, order_cancelled
+from app.core.events import NO_COURIER_REASON, delivery_failed, order_cancelled
 from app.core.rabbitmq import BINDINGS, declare_topology, get_connection
 from app.database import SessionLocal
-from app.models import Delivery, KitchenOrder, Order, OutboxEvent, ProcessedEvent, Role, User
+from app.models import Delivery, KitchenOrder, Order, OutboxEvent, Payment, ProcessedEvent, Refund, Role, User
 
 
 class OrderEvent(BaseModel):
@@ -78,7 +78,7 @@ def process_delivery(db, order, payload: OrderPaid) -> str:
         return f"Заказ {order.id}: назначен курьер {courier.id}"
 
     delivery.status = "failed"
-    event = delivery_failed(order.id, order.user_id, str(payload.event_id), "Свободный курьер не найден")
+    event = delivery_failed(order.id, order.user_id, str(payload.event_id), NO_COURIER_REASON)
     db.add(OutboxEvent(id=event["event_id"], routing_key="delivery.failed", payload=event))
     return f"Заказ {order.id}: курьер не найден, сохранён DeliveryFailed"
 
@@ -87,18 +87,32 @@ def compensate_payment(db, order, payload: DeliveryFailed) -> str:
     # Статус под блокировкой защищает и от нового event_id для той же неудачи.
     if order.status != "paid":
         return f"Компенсация для заказа {order.id} не требуется: {order.status}"
+    delivery = db.query(Delivery).filter_by(order_id=order.id, status="failed").first()
+    if delivery is None or payload.reason != NO_COURIER_REASON:
+        raise ValueError("Не подтверждён сбой доставки из-за отсутствия курьера")
     payment = db.get(OutboxEvent, str(payload.payment_event_id))
     if payment is None or payment.routing_key != "order.paid":
         raise ValueError("Исходное событие оплаты не найдено")
     paid = OrderPaid.model_validate(payment.payload)
     if paid.order_id != order.id or paid.customer_id != order.user_id:
         raise ValueError("Событие оплаты относится к другому заказу")
-    user = db.query(User).filter_by(id=order.user_id).populate_existing().with_for_update().one()
-    user.balance += paid.amount
+    online = db.query(Payment).filter_by(order_id=order.id, status="succeeded").one_or_none()
+    if online is not None:
+        if not online.gateway_id or online.paid_event_id != str(payload.payment_event_id):
+            raise ValueError("Событие доставки не связано с исходным платежом ЮKassa")
+        refund = Refund(id=str(uuid4()), payment_id=online.id, amount=online.amount, currency=online.currency)
+        db.add(refund)
+        result = f"возврат ЮKassa поставлен в очередь: payment_id={online.id}, refund_id={refund.id}"
+    else:
+        # Компенсация заказов, оплаченных внутренним балансом до переключения.
+        user = db.query(User).filter_by(id=order.user_id).populate_existing().with_for_update().one()
+        user.balance += paid.amount
+        result = f"возврат {paid.amount} на баланс пользователя {user.id}"
     order.status = "cancelled"
+    order.cancellation_reason = payload.reason
     event = order_cancelled(order.id, order.user_id, payload.reason)
     db.add(OutboxEvent(id=event["event_id"], routing_key="order.cancelled", payload=event))
-    return f"Заказ {order.id} отменён, возврат {paid.amount} пользователю {user.id}"
+    return f"Заказ {order.id} отменён, {result}"
 
 
 def save_event(payload: OrderEvent, consumer: str, routing_key: str) -> str | None:
