@@ -5,6 +5,7 @@
 .pytest_cache
 **/__pycache__
 labs
+sirius-food-frontend
 loadtest
 screenshots
 celerybeat-schedule*

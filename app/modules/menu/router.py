@@ -31,6 +31,15 @@ def get_menu_category(category_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.get("/items/{item_id}")
+def get_menu_item(item_id: int, db: Session = Depends(get_db)):
+    service = MenuService(get_menu_repository(db))
+    try:
+        return service.get_item(item_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
 @router.post("/items")
 def create_menu_item(
     payload: MenuItemCreate,

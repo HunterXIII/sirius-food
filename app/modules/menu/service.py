@@ -3,7 +3,7 @@
 Здесь нет импортов fastapi и sqlalchemy.
 """
 from app.exceptions import NotFoundError
-from app.modules.menu.repository import MenuRepository
+from app.modules.menu.repository import MenuRepository, item_to_dict
 
 
 class MenuService:
@@ -16,6 +16,13 @@ class MenuService:
     def get_menu(self) -> list[dict]:
         """Всё меню. Откуда данные (БД или кеш), сервис не знает."""
         return self.repository.get_all_items()
+
+    def get_item(self, item_id: int) -> dict:
+        """Данные одного блюда для витрины."""
+        item = self.repository.get_item_by_id(item_id)
+        if item is None:
+            raise NotFoundError("Блюдо не найдено")
+        return item_to_dict(item)
 
     def get_category(self, category_id: int) -> dict:
         """Категория с её блюдами. NotFoundError - категории нет."""
