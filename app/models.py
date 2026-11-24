@@ -77,6 +77,8 @@ class Order(Base):
     quantity = Column(Integer, nullable=False)
     status = Column(String, default="processing")
     total_amount = Column(Numeric(12, 2))
+    correlation_id = Column(String(128), nullable=True)
+    traceparent = Column(String(55), nullable=True)
     cancellation_reason = Column(Text)
     # Время создания (lab5, для статистики). Ставит SQLAlchemy при INSERT.
     # У заказов, созданных до lab5, его нет.

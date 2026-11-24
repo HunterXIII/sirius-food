@@ -2,11 +2,16 @@
 import asyncio
 from uuid import UUID, uuid4
 
+import structlog
+from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, Field
 from sqlalchemy import exists
 from sqlalchemy.dialects.postgresql import insert
 
+from app.core.correlation import CORRELATION_HEADER
 from app.core.events import NO_COURIER_REASON, delivery_failed, order_cancelled
+from app.core.logging import setup_logging
+from app.core.order_tracing import current_traceparent, extract_parent, order_tracer, setup_order_tracing
 from app.core.rabbitmq import BINDINGS, declare_topology, get_connection
 from app.database import SessionLocal
 from app.models import Delivery, KitchenOrder, Order, OutboxEvent, Payment, ProcessedEvent, Refund, Role, User
@@ -78,7 +83,8 @@ def process_delivery(db, order, payload: OrderPaid) -> str:
         return f"Заказ {order.id}: назначен курьер {courier.id}"
 
     delivery.status = "failed"
-    event = delivery_failed(order.id, order.user_id, str(payload.event_id), NO_COURIER_REASON)
+    event = delivery_failed(order.id, order.user_id, str(payload.event_id), NO_COURIER_REASON, order.correlation_id)
+    event["traceparent"] = current_traceparent() or order.traceparent
     db.add(OutboxEvent(id=event["event_id"], routing_key="delivery.failed", payload=event))
     return f"Заказ {order.id}: курьер не найден, сохранён DeliveryFailed"
 
@@ -110,7 +116,8 @@ def compensate_payment(db, order, payload: DeliveryFailed) -> str:
         result = f"возврат {paid.amount} на баланс пользователя {user.id}"
     order.status = "cancelled"
     order.cancellation_reason = payload.reason
-    event = order_cancelled(order.id, order.user_id, payload.reason)
+    event = order_cancelled(order.id, order.user_id, payload.reason, order.correlation_id)
+    event["traceparent"] = current_traceparent() or order.traceparent
     db.add(OutboxEvent(id=event["event_id"], routing_key="order.cancelled", payload=event))
     return f"Заказ {order.id} отменён, {result}"
 
@@ -139,22 +146,42 @@ def save_event(payload: OrderEvent, consumer: str, routing_key: str) -> str | No
 
 
 async def process_message(message, consumer: str) -> None:
+    headers = message.headers or {}
+    correlation_id = headers.get(CORRELATION_HEADER)
+    logger = structlog.get_logger(
+        service=consumer,
+        routing_key=message.routing_key,
+        correlation_id=correlation_id,
+    )
     try:
         # При ошибке reject без requeue: одна попытка, затем DLQ.
         # ACK отправляется только после успешного коммита БД.
-        async with message.process(requeue=False):
-            if message.routing_key not in BINDINGS[consumer]:
-                raise ValueError("Неподходящий тип события для consumer")
-            payload = EVENT_SCHEMAS[message.routing_key].model_validate_json(message.body)
-            result = save_event(payload, consumer, message.routing_key)
-            if result is None:
-                result = f"Повтор {payload.event_id} пропущен"
-            print(f"[{consumer.title()}] {result}", flush=True)
+        with order_tracer.start_as_current_span(
+            f"{consumer.capitalize()}.consume", context=extract_parent(headers.get("traceparent")),
+            kind=SpanKind.CONSUMER,
+            attributes={"messaging.system": "rabbitmq", "routing_key": message.routing_key},
+            record_exception=False,
+        ) as span:
+            if isinstance(correlation_id, str):
+                span.set_attribute("correlation_id", correlation_id)
+            async with message.process(requeue=False):
+                if message.routing_key not in BINDINGS[consumer]:
+                    raise ValueError("Неподходящий тип события для consumer")
+                payload = EVENT_SCHEMAS[message.routing_key].model_validate_json(message.body)
+                span.set_attribute("order_id", payload.order_id)
+                logger = logger.bind(order_id=payload.order_id, event_id=str(payload.event_id))
+                result = save_event(payload, consumer, message.routing_key)
+        if result is None:
+            logger.info("event_duplicate")
+        else:
+            logger.info("order_received" if consumer == "kitchen" else "event_processed", result=result)
     except Exception as error:
-        print(f"[{consumer.title()}] Ошибка обработки: {error}", flush=True)
+        logger.error("processing_failed", error_type=type(error).__name__)
 
 
 async def run_consumer(consumer: str) -> None:
+    setup_logging()
+    setup_order_tracing(consumer)
     connection = await get_connection()
     async with connection:
         channel = await connection.channel()
@@ -166,5 +193,5 @@ async def run_consumer(consumer: str) -> None:
             await process_message(message, consumer)
 
         await queue.consume(callback)
-        print(f"[{consumer.title()}] Ждём события: {', '.join(BINDINGS[consumer])}...", flush=True)
+        structlog.get_logger(service=consumer).info("consumer_started", queue=f"{consumer}_queue")
         await asyncio.Future()

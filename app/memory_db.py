@@ -55,6 +55,8 @@ class OrderRecord:
     status: str
     created_at: datetime | None = None
     total_amount: Decimal | None = None
+    correlation_id: str | None = None
+    traceparent: str | None = None
 
 
 @dataclass

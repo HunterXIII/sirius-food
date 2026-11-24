@@ -2,6 +2,7 @@
 Слой бизнес-логики модуля заказов.
 Здесь нет импортов fastapi и sqlalchemy: сервис не знает ни про HTTP, ни про БД.
 """
+from app.core.order_tracing import current_traceparent, order_tracer
 from app.exceptions import NotFoundError, AccessDeniedError
 from app.modules.orders.amounts import order_total
 from app.modules.orders.repository import OrderRepository
@@ -16,7 +17,7 @@ class OrderService:
         # сервису всё равно, PostgreSQL это или память.
         self.repository = repository
 
-    def create_order(self, user_id: int, item_id: int, quantity: int) -> int:
+    def create_order(self, user_id: int, item_id: int, quantity: int, correlation_id: str | None = None) -> int:
         """
         Сценарий оформления заказа. Возвращает id созданного заказа.
         NotFoundError - нет пользователя или блюда,
@@ -34,7 +35,13 @@ class OrderService:
             raise ValueError("Блюдо недоступно")
 
         total = order_total(item.price, quantity)
-        order_id = self.repository.save_order(user_id, item_id, quantity, status="processing", total_amount=total)
+        parent = current_traceparent()
+        with order_tracer.start_as_current_span("DB.insert_order") as span:
+            order_id = self.repository.save_order(
+                user_id, item_id, quantity, status="processing", total_amount=total,
+                correlation_id=correlation_id, traceparent=parent,
+            )
+            span.set_attribute("order_id", order_id)
 
         # Тяжёлые операции - в фоне. .delay() только кладёт задачу в очередь (Redis)
         # и сразу возвращает управление, выполнит задачу воркер Celery.

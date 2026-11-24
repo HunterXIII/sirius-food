@@ -31,7 +31,10 @@ class OrderRepository(ABC):
         """Найти блюдо по id. Если нет - вернуть None."""
 
     @abstractmethod
-    def save_order(self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal) -> int:
+    def save_order(
+        self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal,
+        correlation_id: str | None = None, traceparent: str | None = None,
+    ) -> int:
         """Сохранить новый заказ и вернуть его id."""
 
     @abstractmethod
@@ -71,13 +74,18 @@ class PostgresOrderRepository(OrderRepository):
     def get_menu_item_by_id(self, item_id: int):
         return self.db.query(MenuItem).filter(MenuItem.id == item_id).first()
 
-    def save_order(self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal) -> int:
+    def save_order(
+        self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal,
+        correlation_id: str | None = None, traceparent: str | None = None,
+    ) -> int:
         new_order = Order(
             user_id=user_id,
             item_id=item_id,
             quantity=quantity,
             status=status,
             total_amount=total_amount,
+            correlation_id=correlation_id,
+            traceparent=traceparent,
         )
         self.db.add(new_order)
         self.db.commit()
@@ -116,7 +124,7 @@ class PostgresOrderRepository(OrderRepository):
         user.balance -= amount
         order.status = "paid"
         self.db.flush()
-        payload = order_paid(order.id, order.user_id, amount)
+        payload = order_paid(order.id, order.user_id, amount, order.correlation_id, order.traceparent)
         self.db.add(OutboxEvent(id=payload["event_id"], routing_key="order.paid", payload=payload))
         # Ни списание, ни заказ не фиксируются отдельно от события.
         self.db.commit()
@@ -131,7 +139,10 @@ class InMemoryOrderRepository(OrderRepository):
     def get_menu_item_by_id(self, item_id: int):
         return memory_db.menu_items.get(item_id)
 
-    def save_order(self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal) -> int:
+    def save_order(
+        self, user_id: int, item_id: int, quantity: int, status: str, total_amount: Decimal,
+        correlation_id: str | None = None, traceparent: str | None = None,
+    ) -> int:
         order_id = len(memory_db.orders) + 1
         memory_db.orders[order_id] = memory_db.OrderRecord(
             id=order_id,
@@ -140,6 +151,8 @@ class InMemoryOrderRepository(OrderRepository):
             quantity=quantity,
             status=status,
             total_amount=total_amount,
+            correlation_id=correlation_id,
+            traceparent=traceparent,
             created_at=datetime.now(),
         )
         return order_id

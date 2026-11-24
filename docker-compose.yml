@@ -8,6 +8,7 @@ x-app: &app
     REDIS_URL: redis://redis:6379
     RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-sirius}:${RABBITMQ_DEFAULT_PASS:-sirius}@rabbitmq:5672/
     DELIVERY_GRPC_TARGET: delivery-grpc:50051
+    ORDER_OTLP_TRACES_ENDPOINT: ${ORDER_OTLP_TRACES_ENDPOINT-http://jaeger:4318/v1/traces}
     REPOSITORY: postgres
   depends_on: &app-dependencies
     migrate:
@@ -48,6 +49,36 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    ports:
+      - "127.0.0.1:16686:16686"
 
   rabbitmq:
     image: rabbitmq:3.13-management
@@ -93,6 +124,8 @@ services:
     environment:
       <<: [*app-env, *yookassa-env]
       DEBUG: ${DEBUG:-True}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_TEST_ENDPOINT_ENABLED: ${SENTRY_TEST_ENDPOINT_ENABLED:-false}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-[]}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT-http://phoenix:6006/v1/traces}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

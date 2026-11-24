@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     DELIVERY_GRPC_TARGET: str = "127.0.0.1:50051"
     DELIVERY_GRPC_BIND: str = "127.0.0.1:50051"
     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: str = ""
+    ORDER_OTLP_TRACES_ENDPOINT: str = ""
+    SENTRY_DSN: SecretStr = SecretStr("")
+    SENTRY_TEST_ENDPOINT_ENABLED: bool = False
     YOOKASSA_SHOP_ID: str = ""
     YOOKASSA_SECRET_KEY: SecretStr = SecretStr("")
     YOOKASSA_RETURN_URL: str = "http://127.0.0.1:8000/docs"

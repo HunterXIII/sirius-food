@@ -2,6 +2,7 @@ from datetime import timedelta, timezone
 import logging
 from random import uniform
 
+import structlog
 from sqlalchemy import select
 
 from app.core.events import order_paid
@@ -9,6 +10,7 @@ from app.models import Order, OutboxEvent, Payment, Refund, utcnow
 from app.modules.payments.yookassa import GatewayError, GatewayPayment, GatewayRefund
 
 logger = logging.getLogger("uvicorn.error")
+event_logger = structlog.get_logger(service="payments")
 RETRY_DELAYS = (1, 2, 4, 8)
 LEASE = timedelta(seconds=90)
 POST_WINDOW = timedelta(hours=23)
@@ -114,6 +116,7 @@ class PaymentService:
                      operation.__tablename__, operation.id, reason)
 
     def apply_payment(self, remote: GatewayPayment, local_id: str | None = None):
+        paid_event = None
         with self.sessions.begin() as db:
             candidate = db.scalar(select(Payment).filter_by(gateway_id=remote.id))
             if candidate is None:
@@ -154,11 +157,20 @@ class PaymentService:
                 if order.status != "processing":
                     raise GatewayMismatch()
                 order.status = "paid"
-                event = order_paid(order.id, order.user_id, float(payment.amount))
-                payment.paid_event_id = event["event_id"]
-                db.add(OutboxEvent(id=event["event_id"], routing_key="order.paid", payload=event))
+                paid_event = order_paid(
+                    order.id, order.user_id, float(payment.amount), order.correlation_id, order.traceparent,
+                )
+                payment.paid_event_id = paid_event["event_id"]
+                db.add(OutboxEvent(id=paid_event["event_id"], routing_key="order.paid", payload=paid_event))
             if previous != payment.status:
                 logger.info("yookassa_payment id=%s order_id=%s status=%s", payment.id, order.id, payment.status)
+        if paid_event is not None:
+            event_logger.info(
+                "order_paid",
+                order_id=paid_event["order_id"],
+                event_id=paid_event["event_id"],
+                correlation_id=paid_event["correlation_id"],
+            )
 
     def apply_refund(self, remote: GatewayRefund, local_id: str | None = None):
         with self.sessions.begin() as db:

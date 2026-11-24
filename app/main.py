@@ -7,9 +7,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.core.config import settings
+from app.core.correlation import CORRELATION_HEADER, correlation_id_middleware
+from app.core.logging import setup_logging
+from app.core.order_tracing import setup_order_tracing
 from app.core.redis import check_redis_connection
+from app.core.sentry import setup_sentry
 from app.database import SessionLocal
 from app.modules.assistant.router import router as assistant_router
 from app.modules.assistant.tracing import assistant_tracing
@@ -38,6 +44,7 @@ def warm_up_menu_cache():
 async def lifespan(app: FastAPI):
     # Код до yield выполняется при старте приложения, после yield - при остановке.
     # Это замена устаревшему @app.on_event("startup").
+    setup_logging()
     warm_up_menu_cache()
     with assistant_tracing(settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT):
         yield
@@ -59,8 +66,11 @@ app.add_middleware(
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH"],
-    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", CORRELATION_HEADER],
+    expose_headers=[CORRELATION_HEADER],
 )
+app.middleware("http")(correlation_id_middleware)
+Instrumentator(excluded_handlers=["/metrics"]).instrument(app).expose(app, include_in_schema=False)
 
 # Пути в auth-роутере уже начинаются с /auth (как в методичке), префикс не нужен.
 app.include_router(auth_router, tags=["auth"])
@@ -71,3 +81,19 @@ app.include_router(orders_router, prefix="/orders", tags=["orders"])
 app.include_router(delivery_router, prefix="/delivery", tags=["delivery"])
 app.include_router(assistant_router, prefix="/assistant", tags=["assistant"])
 app.include_router(payments_router, prefix="/payments", tags=["payments"])
+
+if settings.DEBUG and settings.SENTRY_TEST_ENDPOINT_ENABLED and settings.SENTRY_DSN.get_secret_value():
+    @app.post("/_lab9/sentry-test", include_in_schema=False)
+    async def sentry_test_error():
+        raise RuntimeError("ЛР № 9: контрольная ошибка Sentry")
+
+
+setup_sentry()
+order_provider = setup_order_tracing("api")
+if order_provider is not None:
+    FastAPIInstrumentor.instrument_app(
+        app,
+        tracer_provider=order_provider,
+        excluded_urls="/metrics",
+        exclude_spans=["receive", "send"],
+    )

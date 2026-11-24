@@ -5,6 +5,7 @@ from time import monotonic, sleep
 
 from sqlalchemy import func, select
 
+from app.core.logging import setup_logging
 from app.database import SessionLocal
 from app.models import Payment, Refund
 from app.modules.payments.service import PaymentService
@@ -21,6 +22,7 @@ def log_status_counts():
 
 
 def main():
+    setup_logging()
     logging.basicConfig(level=logging.INFO)
     if not configured():
         logger.info("ЮKassa не настроена, обработчик платежей ждёт перезапуска с настройками")
