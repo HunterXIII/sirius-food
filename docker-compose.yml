@@ -54,6 +54,7 @@ services:
     image: oliver006/redis_exporter:v1.67.0
     environment:
       REDIS_ADDR: redis://redis:6379
+      REDIS_EXPORTER_CHECK_SINGLE_KEYS: db0=default
     depends_on:
       redis:
         condition: service_healthy

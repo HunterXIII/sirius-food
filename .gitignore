@@ -2,3 +2,6 @@
 __pycache__/
 .env
 celerybeat-schedule*
+.mutmut-cache
+.coverage
+htmlcov/

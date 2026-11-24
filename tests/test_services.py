@@ -4,11 +4,13 @@ PostgreSQL не нужен: в сервисы передаются in-memory р�
 Запуск: python -m unittest discover tests -v
 """
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 from app import memory_db
 from app.core.security import verify_password
 from app.exceptions import NotFoundError, ForbiddenError, AccessDeniedError
+from app.modules.orders.amounts import order_total
 from app.modules.orders.repository import InMemoryOrderRepository
 from app.modules.orders.service import OrderService
 from app.modules.users.repository import InMemoryUserRepository
@@ -56,6 +58,19 @@ class OrderServiceTest(unittest.TestCase):
         self.assertEqual(order_id, 1)
         self.assertEqual(memory_db.users[1].balance, 500.0)
         self.assertEqual(memory_db.orders[1].status, "processing")
+
+    def test_order_total_multiplies_and_rounds_half_up(self):
+        self.assertEqual(order_total(1.005, 3), Decimal("3.02"))
+
+    def test_order_total_accepts_smallest_cent_and_highest_total(self):
+        self.assertEqual(order_total(0.005, 1), Decimal("0.01"))
+        self.assertEqual(order_total(9999999999.99, 1), Decimal("9999999999.99"))
+
+    def test_order_total_rejects_invalid_values_before_and_after_rounding(self):
+        for unit_price in (float("nan"), float("inf"), -1, 0, 0.004, 9999999999.995, 10000000000):
+            with self.subTest(unit_price=unit_price):
+                with self.assertRaisesRegex(ValueError, "^Недопустимая сумма заказа$"):
+                    order_total(unit_price, 1)
 
     def test_pay_order_writes_off_balance_once(self):
         order_id = self.service.create_order(user_id=1, item_id=1, quantity=2)
