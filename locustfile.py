@@ -14,7 +14,7 @@ class SiriusUser(HttpUser):
     def on_start(self):
         # Сценарий ЛР № 4 запускается без учётных данных.
         if not self.environment.parsed_options.order_token:
-            self.tasks = [self.get_menu]
+            self.tasks = [type(self).get_menu]
             self.wait_time = self.menu_wait_time
 
     @task(7)
